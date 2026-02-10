@@ -32,15 +32,17 @@ The system consists of two primary components:
 *   Cargo
 
 ### Running the Prototype
-Currently, the system provides a simple UDP-based communication prototype:
+The system provides UDP-based communication for testing GCS implementation:
 
 ```bash
 # Start the Ground Control Station (Receiver)
 cargo run --bin WeWinThis -- receive 8080
 
-# Start the Satellite OCS (Sender)
-cargo run --bin WeWinThis -- send localhost 8080
+# Simulate OCS telemetry using Mock OCS Simulator (see below)
+cargo run --bin mock_ocs -- localhost 8080 normal 100 1000
 ```
+
+**Note:** The `send` mode is available in the `mock_ocs` binary for testing GCS reception.
 
 ### Mock OCS Simulator for GCS Testing
 For Student B (GCS implementation), a **Mock OCS Simulator** is available to simulate OCS telemetry responses without needing the actual OCS code:
