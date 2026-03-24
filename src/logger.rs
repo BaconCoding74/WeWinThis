@@ -37,14 +37,29 @@ pub fn log_telemetry(
     logger: &mut Logger,
     timestamp: u128,
     sequence: u32,
-    temperature: f32,
-    voltage: f32,
+    data_type: &str,
+    value1: f32,
+    value2: f32,
+    value3: f32,
     latency_ms: u128,
-    status: &str,
 ) {
     logger.log(&format!(
-        "{},{},{},{},{},{}",
-        timestamp, sequence, temperature, voltage, latency_ms, status
+        "{},{},{},{},{},{},{}",
+        timestamp, sequence, data_type, value1, value2, value3, latency_ms
+    ));
+}
+
+pub fn log_fault(
+    logger: &mut Logger,
+    timestamp: u128,
+    sequence: u32,
+    alert_code: &str,
+    temperature: f32,
+    action: &str,
+) {
+    logger.log(&format!(
+        "{},{},{},{},{}",
+        timestamp, sequence, alert_code, temperature, action
     ));
 }
 

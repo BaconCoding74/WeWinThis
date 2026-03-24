@@ -18,18 +18,20 @@ use crate::{
 fn main() {
     let system_state = Arc::new(SystemState::new());
 
-    let (command_logger, telemetry_logger, system_state_logger, performance_logger) =
+    let (command_logger, telemetry_logger, system_state_logger, performance_logger, fault_logger) =
         create_shared_loggers();
 
     let state_receiver = Arc::clone(&system_state);
     let telemetry_logger_clone = Arc::clone(&telemetry_logger);
     let system_state_logger_clone = Arc::clone(&system_state_logger);
+    let fault_logger_clone = Arc::clone(&fault_logger);
 
     thread::spawn(move || {
         tcp_listener(
             state_receiver,
             telemetry_logger_clone,
             system_state_logger_clone,
+            fault_logger_clone,
         );
     });
 

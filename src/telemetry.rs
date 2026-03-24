@@ -1,41 +1,78 @@
+use crate::thermal::{decode_status, ThermalStatusMsg, ThermalToComm};
+
 #[derive(Debug, Clone, Copy)]
-pub struct Telemetry {
-    pub sequence: u32,
-    pub temperature: f32,
-    pub voltage: f32,
+pub struct GyroMsg {
+    pub timestamp_ms: u32,
+    pub x_mdps: i16,
+    pub y_mdps: i16,
+    pub z_mdps: i16,
 }
 
-pub fn encode_telemetry(sequence: u32, temperature: f32, voltage: f32) -> [u8; 14] {
-    let mut payload = [0u8; 14];
-    payload[0..4].copy_from_slice(&sequence.to_le_bytes());
-    payload[4..8].copy_from_slice(&temperature.to_le_bytes());
-    payload[8..12].copy_from_slice(&voltage.to_le_bytes());
-    // payload[12..14] reserved
-    payload
+#[derive(Debug, Clone, Copy)]
+pub struct BatteryMsg {
+    pub timestamp_ms: u32,
+    pub ma: i16,
+    pub mv: i16,
+    pub pct: u8,
 }
 
-pub fn decode_telemetry(payload: &[u8; 14]) -> Result<Telemetry, &'static str> {
-    let sequence = u32::from_le_bytes(
-        payload[0..4]
-            .try_into()
-            .map_err(|_| "Invalid telemetry sequence bytes")?,
-    );
+#[derive(Debug, Clone, Copy)]
+pub enum TelemetryData {
+    Gyro(GyroMsg),
+    Battery(BatteryMsg),
+    Thermal(ThermalStatusMsg),
+}
 
-    let temperature = f32::from_le_bytes(
-        payload[4..8]
-            .try_into()
-            .map_err(|_| "Invalid telemetry temperature bytes")?,
-    );
+pub fn decode_telemetry(payload: &[u8]) -> Result<TelemetryData, &'static str> {
+    if payload.is_empty() {
+        return Err("empty telemetry payload");
+    }
 
-    let voltage = f32::from_le_bytes(
-        payload[8..12]
-            .try_into()
-            .map_err(|_| "Invalid telemetry voltage bytes")?,
-    );
+    match payload[0] {
+        // 🔹 Gyro
+        1 => {
+            if payload.len() != 11 {
+                return Err("invalid gyro payload");
+            }
 
-    Ok(Telemetry {
-        sequence,
-        temperature,
-        voltage,
-    })
+            let timestamp = u32::from_le_bytes(payload[1..5].try_into().unwrap());
+            let x = i16::from_le_bytes(payload[5..7].try_into().unwrap());
+            let y = i16::from_le_bytes(payload[7..9].try_into().unwrap());
+            let z = i16::from_le_bytes(payload[9..11].try_into().unwrap());
+
+            Ok(TelemetryData::Gyro(GyroMsg {
+                timestamp_ms: timestamp,
+                x_mdps: x,
+                y_mdps: y,
+                z_mdps: z,
+            }))
+        }
+
+        // 🔹 Battery
+        2 => {
+            if payload.len() != 10 {
+                return Err("invalid battery payload");
+            }
+
+            let timestamp = u32::from_le_bytes(payload[1..5].try_into().unwrap());
+            let ma = i16::from_le_bytes(payload[5..7].try_into().unwrap());
+            let mv = i16::from_le_bytes(payload[7..9].try_into().unwrap());
+            let pct = payload[9];
+
+            Ok(TelemetryData::Battery(BatteryMsg {
+                timestamp_ms: timestamp,
+                ma,
+                mv,
+                pct,
+            }))
+        }
+
+        // 🔹 Thermal Status
+        3 => match decode_status(payload)? {
+            ThermalToComm::Status(s) => Ok(TelemetryData::Thermal(s)),
+            _ => Err("unexpected thermal variant"),
+        },
+
+        _ => Err("unknown telemetry subtype"),
+    }
 }

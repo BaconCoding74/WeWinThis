@@ -12,19 +12,18 @@ use crate::{
     command::CommandScheduler,
     command_schedule::build_command_schedule,
     constants::{LOCALHOST, LOG_DIR, PACKET_SIZE, RECEIVER_PORT},
-    logger::{log_jitter, log_system_state, log_telemetry, now_ms, Logger},
+    logger::{log_fault, log_jitter, log_system_state, log_telemetry, now_ms, Logger},
     network::{decode_ack, decode_packet, AckResult, MessageType},
     system_state::SystemState,
-    thermal::{
-        decode_alert, decode_status, decode_thermal_packet, update_system_state_from_thermal,
-        ThermalToComm,
-    },
+    telemetry::{decode_telemetry, TelemetryData},
+    thermal::{decode_alert, update_system_state_from_thermal, ThermalToComm},
 };
 
 pub fn tcp_listener(
     system_state: Arc<SystemState>,
     telemetry_logger: Arc<Mutex<Logger>>,
     system_state_logger: Arc<Mutex<Logger>>,
+    fault_logger: Arc<Mutex<Logger>>,
 ) {
     let listener =
         TcpListener::bind((LOCALHOST, RECEIVER_PORT)).expect("Failed to bind TCP listener");
@@ -39,6 +38,7 @@ pub fn tcp_listener(
                 let state = Arc::clone(&system_state);
                 let telemetry_logger_clone = Arc::clone(&telemetry_logger);
                 let system_state_logger_clone = Arc::clone(&system_state_logger);
+                let fault_logger_clone = Arc::clone(&fault_logger);
 
                 thread::spawn(move || {
                     gcs_receiver(
@@ -46,6 +46,7 @@ pub fn tcp_listener(
                         state,
                         telemetry_logger_clone,
                         system_state_logger_clone,
+                        fault_logger_clone,
                     );
                 });
             }
@@ -61,6 +62,7 @@ pub fn gcs_receiver(
     system_state: Arc<SystemState>,
     telemetry_logger: Arc<Mutex<Logger>>,
     system_state_logger: Arc<Mutex<Logger>>,
+    fault_logger: Arc<Mutex<Logger>>,
 ) {
     let mut buffer = [0u8; PACKET_SIZE];
     let mut expected_seq: Option<u32> = None;
@@ -78,7 +80,6 @@ pub fn gcs_receiver(
             }
         };
 
-        // ❗ OCS-style: reject partial packet
         if n < PACKET_SIZE {
             eprintln!("Bad packet (partial read): {} bytes", n);
             continue;
@@ -111,59 +112,75 @@ pub fn gcs_receiver(
             MessageType::Telemetry => {
                 let payload = &packet.payload[..packet.payload_len as usize];
 
-                if payload.is_empty() {
-                    eprintln!("Empty telemetry payload");
-                    continue;
-                }
-
-                match payload[0] {
-                    3 => match decode_status(payload) {
-                        Ok(ThermalToComm::Status(s)) => {
-                            update_system_state_from_thermal(
-                                &system_state,
-                                ThermalToComm::Status(s),
-                                packet.seq,
-                            );
-
-                            println!(
-                                "[Status] seq={} temp={:.2}°C target={:.2}°C",
-                                packet.seq,
-                                s.temp_x10 as f32 / 10.0,
-                                s.target_temp_x10 as f32 / 10.0
-                            );
-
-                            let mut logger = telemetry_logger.lock().unwrap();
-                            log_telemetry(
-                                &mut logger,
-                                now_ms(),
-                                packet.seq,
-                                s.temp_x10 as f32 / 10.0,
-                                s.target_temp_x10 as f32 / 10.0,
-                                0,
-                                "STATUS",
-                            );
-                        }
-                        Ok(_) => {
-                            eprintln!("Unexpected telemetry variant");
-                            continue;
-                        }
-                        Err(e) => {
-                            eprintln!("Thermal status decode failed: {}", e);
-                            continue;
-                        }
-                    },
-
-                    1 => {
-                        println!("[Gyro] seq={} received", packet.seq);
-                    }
-
-                    2 => {
-                        println!("[Battery] seq={} received", packet.seq);
-                    }
-
-                    other => {
-                        eprintln!("Unknown telemetry subtype: {}", other);
+                let data = match decode_telemetry(payload) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        eprintln!("Telemetry decode failed: {}", e);
                         continue;
+                    }
+                };
+
+                let now = now_ms();
+                let mut logger = telemetry_logger.lock().unwrap();
+
+                match data {
+                    TelemetryData::Gyro(g) => {
+                        println!(
+                            "[Gyro] seq={} x={} y={} z={}",
+                            packet.seq, g.x_mdps, g.y_mdps, g.z_mdps
+                        );
+
+                        log_telemetry(
+                            &mut logger,
+                            now,
+                            packet.seq,
+                            "GYRO",
+                            g.x_mdps as f32,
+                            g.y_mdps as f32,
+                            g.z_mdps as f32,
+                            latency_ms,
+                        );
+                    }
+
+                    TelemetryData::Battery(b) => {
+                        println!("[Battery] seq={} {}mV {}%", packet.seq, b.mv, b.pct);
+
+                        log_telemetry(
+                            &mut logger,
+                            now,
+                            packet.seq,
+                            "BATTERY",
+                            b.mv as f32,
+                            b.ma as f32,
+                            b.pct as f32,
+                            latency_ms,
+                        );
+                    }
+
+                    TelemetryData::Thermal(s) => {
+                        update_system_state_from_thermal(
+                            &system_state,
+                            ThermalToComm::Status(s),
+                            packet.seq,
+                        );
+
+                        println!(
+                            "[Status] seq={} temp={:.2}°C target={:.2}°C",
+                            packet.seq,
+                            s.temp_x10 as f32 / 10.0,
+                            s.target_temp_x10 as f32 / 10.0
+                        );
+
+                        log_telemetry(
+                            &mut logger,
+                            now,
+                            packet.seq,
+                            "THERMAL",
+                            s.temp_x10 as f32 / 10.0,
+                            s.target_temp_x10 as f32 / 10.0,
+                            0.0,
+                            latency_ms,
+                        );
                     }
                 }
             }
@@ -171,39 +188,50 @@ pub fn gcs_receiver(
             MessageType::Fault => {
                 let payload = &packet.payload[..packet.payload_len as usize];
 
-                match decode_alert(payload) {
-                    Ok(ThermalToComm::Alert(a)) => {
-                        update_system_state_from_thermal(
-                            &system_state,
-                            ThermalToComm::Alert(a),
-                            packet.seq,
-                        );
+                if payload.is_empty() {
+                    eprintln!("Empty fault payload");
+                    continue;
+                }
 
-                        println!(
-                            "[Alert] seq={} {:?} temp={:.2}°C action={:?}",
-                            packet.seq,
-                            a.alert_code,
-                            a.temp_x10 as f32 / 10.0,
-                            a.action_code
-                        );
+                match payload[0] {
+                    1 => match decode_alert(payload) {
+                        Ok(ThermalToComm::Alert(a)) => {
+                            update_system_state_from_thermal(
+                                &system_state,
+                                ThermalToComm::Alert(a),
+                                packet.seq,
+                            );
 
-                        let mut logger = telemetry_logger.lock().unwrap();
-                        log_telemetry(
-                            &mut logger,
-                            now_ms(),
-                            packet.seq,
-                            a.temp_x10 as f32 / 10.0,
-                            0.0,
-                            0,
-                            "ALERT",
-                        );
-                    }
-                    Ok(_) => {
-                        eprintln!("Unexpected fault variant");
-                        continue;
-                    }
-                    Err(e) => {
-                        eprintln!("Thermal alert decode failed: {}", e);
+                            println!(
+                                "[Alert] seq={} {:?} temp={:.2}°C action={:?}",
+                                packet.seq,
+                                a.alert_code,
+                                a.temp_x10 as f32 / 10.0,
+                                a.action_code
+                            );
+
+                            let mut logger = fault_logger.lock().unwrap();
+                            log_fault(
+                                &mut logger,
+                                now,
+                                packet.seq,
+                                &format!("{:?}", a.alert_code),
+                                a.temp_x10 as f32 / 10.0,
+                                &format!("{:?}", a.action_code),
+                            );
+                        }
+                        Ok(_) => {
+                            eprintln!("Unexpected fault variant");
+                            continue;
+                        }
+                        Err(e) => {
+                            eprintln!("Thermal alert decode failed: {}", e);
+                            continue;
+                        }
+                    },
+
+                    other => {
+                        eprintln!("Unknown fault subtype: {}", other);
                         continue;
                     }
                 }
@@ -307,9 +335,13 @@ pub fn gcs_scheduler(
     }
 }
 
-type SharedLogger = Arc<Mutex<Logger>>;
-
-pub fn create_shared_loggers() -> (SharedLogger, SharedLogger, SharedLogger, SharedLogger) {
+pub fn create_shared_loggers() -> (
+    Arc<Mutex<Logger>>,
+    Arc<Mutex<Logger>>,
+    Arc<Mutex<Logger>>,
+    Arc<Mutex<Logger>>,
+    Arc<Mutex<Logger>>,
+) {
     let mut log_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     log_dir.push(LOG_DIR);
     fs::create_dir_all(&log_dir).expect("Failed to create logs directory");
@@ -323,8 +355,11 @@ pub fn create_shared_loggers() -> (SharedLogger, SharedLogger, SharedLogger, Sha
     let mut system_state_log_path = log_dir.clone();
     system_state_log_path.push("system_state_log.csv");
 
-    let mut perf_log_path = log_dir;
+    let mut perf_log_path = log_dir.clone();
     perf_log_path.push("performance_log.csv");
+
+    let mut fault_log_path = log_dir.clone();
+    fault_log_path.push("fault_log.csv");
 
     let command_logger = Arc::new(Mutex::new(Logger::new(
         File::create(cmd_log_path).expect("Failed to create command log"),
@@ -342,10 +377,15 @@ pub fn create_shared_loggers() -> (SharedLogger, SharedLogger, SharedLogger, Sha
         File::create(perf_log_path).expect("Failed to create performance log"),
     )));
 
+    let fault_logger = Arc::new(Mutex::new(Logger::new(
+        File::create(fault_log_path).expect("Failed to create fault log"),
+    )));
+
     (
         command_logger,
         telemetry_logger,
         system_state_logger,
         performance_logger,
+        fault_logger,
     )
 }
