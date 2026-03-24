@@ -188,52 +188,44 @@ pub fn gcs_receiver(
             MessageType::Fault => {
                 let payload = &packet.payload[..packet.payload_len as usize];
 
-                if payload.is_empty() {
-                    eprintln!("Empty fault payload");
-                    continue;
-                }
-
-                match payload[0] {
-                    1 => match decode_alert(payload) {
-                        Ok(ThermalToComm::Alert(a)) => {
-                            update_system_state_from_thermal(
-                                &system_state,
-                                ThermalToComm::Alert(a),
-                                packet.seq,
-                            );
-
-                            println!(
-                                "[Alert] seq={} {:?} temp={:.2}°C action={:?}",
-                                packet.seq,
-                                a.alert_code,
-                                a.temp_x10 as f32 / 10.0,
-                                a.action_code
-                            );
-
-                            let mut logger = fault_logger.lock().unwrap();
-                            log_fault(
-                                &mut logger,
-                                now,
-                                packet.seq,
-                                &format!("{:?}", a.alert_code),
-                                a.temp_x10 as f32 / 10.0,
-                                &format!("{:?}", a.action_code),
-                            );
-                        }
-                        Ok(_) => {
-                            eprintln!("Unexpected fault variant");
-                            continue;
-                        }
-                        Err(e) => {
-                            eprintln!("Thermal alert decode failed: {}", e);
-                            continue;
-                        }
-                    },
-
-                    other => {
-                        eprintln!("Unknown fault subtype: {}", other);
+                let msg = match decode_alert(payload) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        eprintln!(
+                            "Thermal alert decode failed: {} | len={} first_byte={}",
+                            e,
+                            payload.len(),
+                            payload.get(0).unwrap_or(&0)
+                        );
                         continue;
                     }
+                };
+
+                if let ThermalToComm::Alert(a) = msg {
+                    update_system_state_from_thermal(
+                        &system_state,
+                        ThermalToComm::Alert(a),
+                        packet.seq,
+                    );
+
+                    println!(
+                        "[Alert] seq={} {:?} temp={:.2}°C action={:?}",
+                        packet.seq,
+                        a.alert_code,
+                        a.temp_x10 as f32 / 10.0,
+                        a.action_code
+                    );
+
+                    let mut logger = fault_logger.lock().unwrap();
+
+                    log_fault(
+                        &mut logger,
+                        now_ms(),
+                        packet.seq,
+                        &format!("{:?}", a.alert_code),
+                        a.temp_x10 as f32 / 10.0,
+                        &format!("{:?}", a.action_code),
+                    );
                 }
             }
 

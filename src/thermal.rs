@@ -1,9 +1,6 @@
 use std::sync::atomic::Ordering;
 
-use crate::{
-    network::{MessageType, Packet},
-    system_state::{RuntimeMode, SystemState},
-};
+use crate::system_state::{RuntimeMode, SystemState};
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,16 +46,6 @@ pub enum ThermalToComm {
     Alert(ThermalAlertMsg),
 }
 
-pub fn decode_thermal_packet(packet: &Packet) -> Result<ThermalToComm, &'static str> {
-    let payload = &packet.payload[..packet.payload_len as usize];
-
-    match packet.msg_type {
-        MessageType::Telemetry => decode_status(payload),
-        MessageType::Fault => decode_alert(payload),
-        _ => Err("unsupported message type"),
-    }
-}
-
 pub fn decode_status(payload: &[u8]) -> Result<ThermalToComm, &'static str> {
     if payload.len() < 11 || payload[0] != 3 {
         return Err("invalid thermal status payload");
@@ -88,7 +75,7 @@ pub fn decode_status(payload: &[u8]) -> Result<ThermalToComm, &'static str> {
 }
 
 pub fn decode_alert(payload: &[u8]) -> Result<ThermalToComm, &'static str> {
-    if payload.len() != 10 || payload[0] != 4 {
+    if payload.len() != 10 || payload[0] != 1 {
         return Err("invalid thermal alert payload");
     }
 
