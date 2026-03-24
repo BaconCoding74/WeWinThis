@@ -2,13 +2,11 @@ mod command;
 mod constants;
 mod gcs;
 mod logger;
-mod mock_ocs;
 mod network;
 mod system_state;
 mod telemetry;
 
 use std::{
-    env,
     sync::{Arc, Mutex},
     thread,
     time::Duration,
@@ -16,56 +14,40 @@ use std::{
 
 use crate::{
     gcs::{create_shared_loggers, gcs_scheduler, tcp_listener},
-    mock_ocs::sender,
     system_state::SystemState,
 };
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    let system_state = Arc::new(Mutex::new(SystemState::new()));
 
-    if args.len() < 2 {
-        println!("Usage: cargo run -- receiver | sender");
-        return;
-    }
+    let (command_logger, telemetry_logger, system_state_logger, performance_logger) =
+        create_shared_loggers();
 
-    let mode = &args[1];
+    let state_receiver = Arc::clone(&system_state);
+    let telemetry_logger_clone = Arc::clone(&telemetry_logger);
+    let system_state_logger_clone = Arc::clone(&system_state_logger);
 
-    if mode == "receiver" {
-        let system_state = Arc::new(Mutex::new(SystemState::new()));
+    thread::spawn(move || {
+        tcp_listener(
+            state_receiver,
+            telemetry_logger_clone,
+            system_state_logger_clone,
+        );
+    });
 
-        let (command_logger, telemetry_logger, system_state_logger, performance_logger) =
-            create_shared_loggers();
+    let state_scheduler = Arc::clone(&system_state);
+    let command_logger_clone = Arc::clone(&command_logger);
+    let performance_logger_clone = Arc::clone(&performance_logger);
 
-        let state_receiver = Arc::clone(&system_state);
-        let telemetry_logger_clone = Arc::clone(&telemetry_logger);
-        let system_state_logger_clone = Arc::clone(&system_state_logger);
+    thread::spawn(move || {
+        gcs_scheduler(
+            state_scheduler,
+            command_logger_clone,
+            performance_logger_clone,
+        );
+    });
 
-        thread::spawn(move || {
-            tcp_listener(
-                state_receiver,
-                telemetry_logger_clone,
-                system_state_logger_clone,
-            );
-        });
-
-        let state_scheduler = Arc::clone(&system_state);
-        let command_logger_clone = Arc::clone(&command_logger);
-        let performance_logger_clone = Arc::clone(&performance_logger);
-
-        thread::spawn(move || {
-            gcs_scheduler(
-                state_scheduler,
-                command_logger_clone,
-                performance_logger_clone,
-            );
-        });
-
-        loop {
-            thread::sleep(Duration::from_secs(1));
-        }
-    } else if mode == "sender" {
-        sender();
-    } else {
-        println!("Unknown mode");
+    loop {
+        thread::sleep(Duration::from_secs(1));
     }
 }
