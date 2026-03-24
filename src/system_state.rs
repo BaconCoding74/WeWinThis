@@ -1,82 +1,75 @@
-#[derive(Debug, Clone, Copy)]
-pub enum SystemMode {
-    Safe,
-    Emergency,
+use std::sync::atomic::{AtomicBool, AtomicI16, AtomicU32, AtomicU8, Ordering};
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeMode {
+    Safe = 0,
+    Emergency = 1,
 }
 
-#[derive(Debug, Clone)]
 pub struct SystemState {
-    pub last_sequence: u32,
-    pub system_mode: SystemMode,
-    pub last_temperature: f32,
+    pub stop: AtomicBool,
+    pub mode: AtomicU8,
+    pub visibility_open: AtomicBool,
+
+    pub last_temp_x10: AtomicI16,
+    pub thermal_overheat: AtomicBool,
+    pub thermal_alert: AtomicBool,
+
+    pub last_sequence: AtomicU32,
 }
 
 impl SystemState {
     pub fn new() -> Self {
         Self {
-            last_sequence: 0,
-            system_mode: SystemMode::Safe,
-            last_temperature: 0.0,
+            stop: AtomicBool::new(false),
+            mode: AtomicU8::new(RuntimeMode::Safe as u8),
+            visibility_open: AtomicBool::new(false),
+
+            last_temp_x10: AtomicI16::new(0),
+            thermal_overheat: AtomicBool::new(false),
+            thermal_alert: AtomicBool::new(false),
+
+            last_sequence: AtomicU32::new(0),
         }
     }
 
-    pub fn set_sequence(&mut self, seq: u32) {
-        self.last_sequence = seq;
+    pub fn get_mode(&self) -> RuntimeMode {
+        match self.mode.load(Ordering::Acquire) {
+            1 => RuntimeMode::Emergency,
+            _ => RuntimeMode::Safe,
+        }
     }
 
-    pub fn set_mode(&mut self, mode: SystemMode) {
-        self.system_mode = mode;
+    pub fn set_mode(&self, mode: RuntimeMode) {
+        self.mode.store(mode as u8, Ordering::Release);
     }
 
-    pub fn set_temperature(&mut self, temp: f32) {
-        self.last_temperature = temp;
+    pub fn set_temperature(&self, temp_x10: i16) {
+        self.last_temp_x10.store(temp_x10, Ordering::Release);
     }
-}
 
-#[derive(Debug, Clone, Copy)]
-pub struct SystemStateMessage {
-    pub last_sequence: u32,
-    pub system_mode: SystemMode,
-    pub last_temperature: f32,
-}
+    pub fn get_temperature(&self) -> f32 {
+        self.last_temp_x10.load(Ordering::Acquire) as f32 / 10.0
+    }
 
-pub fn encode_system_state(
-    last_sequence: u32,
-    system_mode: SystemMode,
-    last_temperature: f32,
-) -> [u8; 14] {
-    let mut payload = [0u8; 14];
-    payload[0..4].copy_from_slice(&last_sequence.to_be_bytes());
-    payload[4] = match system_mode {
-        SystemMode::Safe => 1,
-        SystemMode::Emergency => 2,
-    };
-    payload[5..9].copy_from_slice(&last_temperature.to_be_bytes());
-    payload
-}
+    pub fn is_overheated(&self) -> bool {
+        self.thermal_overheat.load(Ordering::Acquire)
+    }
 
-pub fn decode_system_state(payload: &[u8; 14]) -> Result<SystemStateMessage, &'static str> {
-    let last_sequence = u32::from_be_bytes(
-        payload[0..4]
-            .try_into()
-            .map_err(|_| "Invalid system state sequence bytes")?,
-    );
+    pub fn set_sequence(&self, seq: u32) {
+        self.last_sequence.store(seq, Ordering::Release);
+    }
 
-    let system_mode = match payload[4] {
-        1 => SystemMode::Safe,
-        2 => SystemMode::Emergency,
-        _ => return Err("Invalid system mode"),
-    };
+    pub fn get_sequence(&self) -> u32 {
+        self.last_sequence.load(Ordering::Acquire)
+    }
 
-    let last_temperature = f32::from_be_bytes(
-        payload[5..9]
-            .try_into()
-            .map_err(|_| "Invalid temperature bytes")?,
-    );
+    pub fn set_visibility(&self, visible: bool) {
+        self.visibility_open.store(visible, Ordering::Release);
+    }
 
-    Ok(SystemStateMessage {
-        last_sequence,
-        system_mode,
-        last_temperature,
-    })
+    pub fn is_visible(&self) -> bool {
+        self.visibility_open.load(Ordering::Acquire)
+    }
 }

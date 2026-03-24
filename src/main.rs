@@ -1,16 +1,14 @@
 mod command;
+mod command_schedule;
 mod constants;
 mod gcs;
 mod logger;
 mod network;
 mod system_state;
 mod telemetry;
+mod thermal;
 
-use std::{
-    sync::{Arc, Mutex},
-    thread,
-    time::Duration,
-};
+use std::{sync::Arc, thread, time::Duration};
 
 use crate::{
     gcs::{create_shared_loggers, gcs_scheduler, tcp_listener},
@@ -18,7 +16,7 @@ use crate::{
 };
 
 fn main() {
-    let system_state = Arc::new(Mutex::new(SystemState::new()));
+    let system_state = Arc::new(SystemState::new());
 
     let (command_logger, telemetry_logger, system_state_logger, performance_logger) =
         create_shared_loggers();

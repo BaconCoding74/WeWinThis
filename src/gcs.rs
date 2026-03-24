@@ -9,19 +9,20 @@ use std::{
 };
 
 use crate::{
-    command::{
-        load_schedule, parse_command_type, parse_sensor_type, Command, CommandScheduler,
-        ScheduledCommand,
-    },
-    constants::{ASSET_DIR, LOCALHOST, LOG_DIR, PACKET_SIZE, RECEIVER_PORT},
+    command::CommandScheduler,
+    command_schedule::build_command_schedule,
+    constants::{LOCALHOST, LOG_DIR, PACKET_SIZE, RECEIVER_PORT},
     logger::{log_jitter, log_system_state, log_telemetry, now_ms, Logger},
-    network::{decode_packet, MessageType},
-    system_state::{decode_system_state, SystemState},
-    telemetry::decode_telemetry,
+    network::{decode_ack, decode_packet, AckResult, MessageType},
+    system_state::SystemState,
+    thermal::{
+        decode_alert, decode_status, decode_thermal_packet, update_system_state_from_thermal,
+        ThermalToComm,
+    },
 };
 
 pub fn tcp_listener(
-    system_state: Arc<Mutex<SystemState>>,
+    system_state: Arc<SystemState>,
     telemetry_logger: Arc<Mutex<Logger>>,
     system_state_logger: Arc<Mutex<Logger>>,
 ) {
@@ -57,7 +58,7 @@ pub fn tcp_listener(
 
 pub fn gcs_receiver(
     mut stream: TcpStream,
-    system_state: Arc<Mutex<SystemState>>,
+    system_state: Arc<SystemState>,
     telemetry_logger: Arc<Mutex<Logger>>,
     system_state_logger: Arc<Mutex<Logger>>,
 ) {
@@ -65,102 +66,144 @@ pub fn gcs_receiver(
     let mut expected_seq: Option<u32> = None;
 
     loop {
-        match stream.read_exact(&mut buffer) {
-            Ok(()) => {}
-            Err(e) => {
-                eprintln!("Read error / client disconnected: {}", e);
-                break;
-            }
+        if let Err(e) = stream.read_exact(&mut buffer) {
+            eprintln!("Read error / client disconnected: {}", e);
+            break;
         }
-
         let packet = match decode_packet(&buffer) {
             Ok(p) => p,
             Err(e) => {
-                println!("Decode error: {}", e);
+                eprintln!("Decode error: {}", e);
                 continue;
             }
         };
-
         if let Some(prev) = expected_seq {
-            let wanted = prev.wrapping_add(1);
-            if packet.seq != wanted {
+            let expected = prev.wrapping_add(1);
+            if packet.seq != expected {
                 eprintln!(
                     "Sequence gap detected: expected {}, got {}",
-                    wanted, packet.seq
+                    expected, packet.seq
                 );
             }
         }
         expected_seq = Some(packet.seq);
 
+        let timestamp = now_ms();
+
         match packet.msg_type {
             MessageType::Telemetry => {
-                let Ok(t) = decode_telemetry(&packet.payload) else {
-                    eprintln!("Telemetry decode failed");
-                    continue;
+                let payload = &packet.payload[..packet.payload_len as usize];
+
+                let msg = match decode_status(payload) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        eprintln!("Thermal status decode failed: {}", e);
+                        continue;
+                    }
                 };
 
-                println!(
-                    "[Telemetry] seq={} temp={:.2} voltage={:.2}",
-                    t.sequence, t.temperature, t.voltage
-                );
+                update_system_state_from_thermal(&system_state, msg, packet.seq);
 
-                let timestamp = now_ms();
+                if let ThermalToComm::Status(s) = msg {
+                    println!(
+                        "[Status] seq={} temp={:.2}°C",
+                        packet.seq,
+                        s.temp_x10 as f32 / 10.0
+                    );
 
-                {
                     let mut logger = telemetry_logger.lock().unwrap();
                     log_telemetry(
                         &mut logger,
                         timestamp,
-                        t.sequence,
-                        t.temperature,
-                        t.voltage,
+                        packet.seq,
+                        s.temp_x10 as f32 / 10.0,
+                        s.target_temp_x10 as f32 / 10.0,
                         0,
-                        "OK",
+                        "STATUS",
                     );
-                }
-
-                {
-                    let mut state = system_state.lock().unwrap();
-                    state.set_sequence(t.sequence);
-                    state.set_temperature(t.temperature);
                 }
             }
 
-            MessageType::SystemState => {
-                let Ok(t) = decode_system_state(&packet.payload) else {
-                    eprintln!("System state decode failed");
-                    continue;
+            MessageType::Fault => {
+                let payload = &packet.payload[..packet.payload_len as usize];
+
+                let msg = match decode_alert(payload) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        eprintln!("Thermal alert decode failed: {}", e);
+                        continue;
+                    }
                 };
 
-                {
-                    let mut state = system_state.lock().unwrap();
-                    state.set_sequence(t.last_sequence);
-                    state.set_mode(t.system_mode);
-                    state.set_temperature(t.last_temperature);
-                }
+                update_system_state_from_thermal(&system_state, msg, packet.seq);
 
-                let timestamp = now_ms();
+                if let ThermalToComm::Alert(a) = msg {
+                    println!(
+                        "[Alert] seq={} {:?} temp={:.2}°C",
+                        packet.seq,
+                        a.alert_code,
+                        a.temp_x10 as f32 / 10.0
+                    );
 
-                {
-                    let mut logger = system_state_logger.lock().unwrap();
-                    log_system_state(
+                    let mut logger = telemetry_logger.lock().unwrap();
+                    log_telemetry(
                         &mut logger,
                         timestamp,
-                        &format!("{:?}", t.system_mode),
-                        "STATE_UPDATE",
+                        packet.seq,
+                        a.temp_x10 as f32 / 10.0,
+                        0.0,
+                        0,
+                        "ALERT",
                     );
+                }
+            }
+
+            MessageType::Ack => {
+                let payload = &packet.payload[..packet.payload_len as usize];
+
+                match decode_ack(payload) {
+                    Ok(AckResult::Success) => {
+                        println!("[ACK] seq={} SUCCESS", packet.seq);
+                    }
+
+                    Ok(AckResult::Rejected(reason)) => {
+                        println!("[ACK] seq={} REJECTED reason={:?}", packet.seq, reason);
+                    }
+
+                    Err(e) => {
+                        eprintln!("ACK decode failed: {}", e);
+                    }
                 }
             }
 
             MessageType::Command => {
-                println!("Command packet received");
+                println!("[INFO] Command packet received (unexpected at GCS)");
             }
+
+            MessageType::CommandResponse => {
+                println!("[INFO] Command response received");
+            }
+        }
+
+        {
+            let mut logger = system_state_logger.lock().unwrap();
+
+            log_system_state(
+                &mut logger,
+                timestamp,
+                &format!("{:?}", system_state.get_mode()),
+                if system_state.is_overheated() {
+                    "OVERHEAT"
+                } else {
+                    "NORMAL"
+                },
+            );
         }
     }
 }
 
 pub fn gcs_scheduler(
-    system_state: Arc<Mutex<SystemState>>,
+    system_state: Arc<SystemState>,
     command_logger: Arc<Mutex<Logger>>,
     performance_logger: Arc<Mutex<Logger>>,
 ) {
@@ -168,27 +211,14 @@ pub fn gcs_scheduler(
         TcpStream::connect((LOCALHOST, RECEIVER_PORT)).expect("Failed to connect to TCP server");
 
     let mut scheduler = CommandScheduler::new(stream);
+
     let start_time = Instant::now();
     let now = Instant::now();
 
-    let mut schedule_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    schedule_path.push(ASSET_DIR);
-    schedule_path.push("preset_schedule.json");
+    let scheduled_commands = build_command_schedule(now);
 
-    let configs = load_schedule(schedule_path.to_str().unwrap());
-
-    for cfg in configs {
-        let command = Command {
-            cmd_type: parse_command_type(&cfg.cmd_type),
-            sensor: cfg.sensor.map(|s| parse_sensor_type(&s)),
-            value: cfg.value,
-        };
-
-        scheduler.schedule(ScheduledCommand {
-            command,
-            scheduled_time: now + Duration::from_millis(cfg.delay_ms),
-            deadline: Duration::from_millis(2),
-        });
+    for cmd in scheduled_commands {
+        scheduler.schedule(cmd);
     }
 
     let mut last_run = Instant::now();
@@ -209,18 +239,14 @@ pub fn gcs_scheduler(
         let actual_elapsed_ms = start_time.elapsed().as_millis();
         let _drift_ms = actual_elapsed_ms.abs_diff(expected_elapsed_ms);
 
-        let state_snapshot = {
-            let state = system_state.lock().unwrap();
-            state.clone()
-        };
-
         let did_run = {
             let mut cmd_logger = command_logger.lock().unwrap();
-            scheduler.run(&state_snapshot, &mut cmd_logger)
+            scheduler.run(&system_state, &mut cmd_logger)
         };
 
         if did_run {
             let mut perf_logger = performance_logger.lock().unwrap();
+
             log_jitter(
                 &mut perf_logger,
                 now_ms(),
@@ -235,12 +261,9 @@ pub fn gcs_scheduler(
     }
 }
 
-pub fn create_shared_loggers() -> (
-    Arc<Mutex<Logger>>,
-    Arc<Mutex<Logger>>,
-    Arc<Mutex<Logger>>,
-    Arc<Mutex<Logger>>,
-) {
+type SharedLogger = Arc<Mutex<Logger>>;
+
+pub fn create_shared_loggers() -> (SharedLogger, SharedLogger, SharedLogger, SharedLogger) {
     let mut log_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     log_dir.push(LOG_DIR);
     fs::create_dir_all(&log_dir).expect("Failed to create logs directory");
