@@ -1,0 +1,20 @@
+[
+  {
+    "cmd_type": "RequestTelemetry",
+    "sensor": null,
+    "value": null,
+    "delay_ms": 1000
+  },
+  {
+    "cmd_type": "SetSensorRate",
+    "sensor": "Thermal",
+    "value": 5,
+    "delay_ms": 2000
+  },
+  {
+    "cmd_type": "RequestSafeMode",
+    "sensor": null,
+    "value": null,
+    "delay_ms": 3000
+  }
+]

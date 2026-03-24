@@ -1,98 +1,71 @@
-use std::net::{SocketAddr, UdpSocket};
-use std::str;
+mod command;
+mod constants;
+mod gcs;
+mod logger;
+mod mock_ocs;
+mod network;
+mod system_state;
+mod telemetry;
 
-fn main() -> std::io::Result<()> {
-    let args: Vec<String> = std::env::args().collect();
+use std::{
+    env,
+    sync::{Arc, Mutex},
+    thread,
+    time::Duration,
+};
 
-    let mode = args.get(1).map(|s| s.as_str()).unwrap_or("");
-    match mode {
-        "send" => {
-            let host = match args.get(2) {
-                Some(v) => v,
-                None => {
-                    eprintln!("Usage: {} send <host> <port>", args[0]);
-                    return Ok(());
-                }
-            };
+use crate::{
+    gcs::{create_shared_loggers, gcs_scheduler, tcp_listener},
+    mock_ocs::sender,
+    system_state::SystemState,
+};
 
-            let port_str = match args.get(3) {
-                Some(v) => v,
-                None => {
-                    eprintln!("Usage: {} send <host> <port>", args[0]);
-                    return Ok(());
-                }
-            };
+fn main() {
+    let args: Vec<String> = env::args().collect();
 
-            let port: u16 = match port_str.parse() {
-                Ok(p) => p,
-                Err(_) => {
-                    eprintln!("Invalid port: {}", port_str);
-                    return Ok(());
-                }
-            };
-
-            udp_send(host, port)?;
-        }
-        "receive" => {
-            let port_str = match args.get(2) {
-                Some(v) => v,
-                None => {
-                    eprintln!("Usage: {} receive <port>", args[0]);
-                    return Ok(());
-                }
-            };
-
-            let port: u16 = match port_str.parse() {
-                Ok(p) => p,
-                Err(_) => {
-                    eprintln!("Invalid port: {}", port_str);
-                    return Ok(());
-                }
-            };
-
-            udp_receive(port)?;
-        }
-        _ => {
-            eprintln!("Usage: {} [send|receive]", args[0]);
-        }
+    if args.len() < 2 {
+        println!("Usage: cargo run -- receiver | sender");
+        return;
     }
 
-    Ok(())
-}
+    let mode = &args[1];
 
-fn udp_send(host: &str, port: u16) -> std::io::Result<()> {
-    let socket = UdpSocket::bind("0.0.0.0:0")?;
-    let addr: SocketAddr = format!("{}:{}", host, port)
-        .parse()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    if mode == "receiver" {
+        let system_state = Arc::new(Mutex::new(SystemState::new()));
 
-    let message = "Hello, UDP!";
-    socket.send_to(message.as_bytes(), addr)?;
-    println!("Sent '{}' to {}", message, addr);
-    Ok(())
-}
+        let (command_logger, telemetry_logger, system_state_logger, performance_logger) =
+            create_shared_loggers();
 
-fn udp_receive(port: u16) -> std::io::Result<()> {
-    let socket = UdpSocket::bind(("0.0.0.0", port))?;
-    println!("Listening on port {}...", port);
+        let state_receiver = Arc::clone(&system_state);
+        let telemetry_logger_clone = Arc::clone(&telemetry_logger);
+        let system_state_logger_clone = Arc::clone(&system_state_logger);
 
-    let mut buffer = [0u8; 1024];
+        thread::spawn(move || {
+            tcp_listener(
+                state_receiver,
+                telemetry_logger_clone,
+                system_state_logger_clone,
+            );
+        });
 
-    loop {
-        let (bytes_read, sender_addr) = socket.recv_from(&mut buffer)?;
-        match str::from_utf8(&buffer[..bytes_read]) {
-            Ok(received) => {
-                println!(
-                    "Received {} bytes from {}: {}",
-                    bytes_read, sender_addr, received
-                );
-            }
-            Err(_) => {
-                println!(
-                    "Received {} bytes from {} (non-UTF8 data)",
-                    bytes_read, sender_addr
-                );
-            }
+        let state_scheduler = Arc::clone(&system_state);
+        let command_logger_clone = Arc::clone(&command_logger);
+        let performance_logger_clone = Arc::clone(&performance_logger);
+
+        thread::spawn(move || {
+            gcs_scheduler(
+                state_scheduler,
+                command_logger_clone,
+                performance_logger_clone,
+            );
+        });
+
+        loop {
+            thread::sleep(Duration::from_secs(1));
         }
+    } else if mode == "sender" {
+        sender();
+    } else {
+        println!("Unknown mode");
     }
 }
