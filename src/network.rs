@@ -40,8 +40,8 @@ pub fn encode_packet(packet: &Packet) -> [u8; PACKET_SIZE] {
 
     buf[0] = packet.msg_type as u8;
 
-    buf[1..5].copy_from_slice(&packet.seq.to_be_bytes());
-    buf[5..9].copy_from_slice(&packet.timestamp_ms.to_be_bytes());
+    buf[1..5].copy_from_slice(&packet.seq.to_le_bytes());
+    buf[5..9].copy_from_slice(&packet.timestamp_ms.to_le_bytes());
 
     buf[9] = packet.payload_len;
 
@@ -57,9 +57,9 @@ pub fn decode_packet(buf: &[u8]) -> Result<Packet, &'static str> {
 
     let msg_type = MessageType::try_from(buf[0])?;
 
-    let seq = u32::from_be_bytes(buf[1..5].try_into().map_err(|_| "Invalid seq")?);
+    let seq = u32::from_le_bytes(buf[1..5].try_into().map_err(|_| "Invalid seq")?);
 
-    let timestamp_ms = u32::from_be_bytes(buf[5..9].try_into().map_err(|_| "Invalid timestamp")?);
+    let timestamp_ms = u32::from_le_bytes(buf[5..9].try_into().map_err(|_| "Invalid timestamp")?);
 
     let payload_len = buf[9];
 

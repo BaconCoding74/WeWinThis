@@ -66,10 +66,24 @@ pub fn gcs_receiver(
     let mut expected_seq: Option<u32> = None;
 
     loop {
-        if let Err(e) = stream.read_exact(&mut buffer) {
-            eprintln!("Read error / client disconnected: {}", e);
-            break;
+        let n = match stream.read(&mut buffer) {
+            Ok(0) => {
+                eprintln!("Client disconnected");
+                break;
+            }
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("Read error: {}", e);
+                break;
+            }
+        };
+
+        // ❗ OCS-style: reject partial packet
+        if n < PACKET_SIZE {
+            eprintln!("Bad packet (partial read): {} bytes", n);
+            continue;
         }
+
         let packet = match decode_packet(&buffer) {
             Ok(p) => p,
             Err(e) => {
@@ -77,6 +91,8 @@ pub fn gcs_receiver(
                 continue;
             }
         };
+
+        // Sequence check
         if let Some(prev) = expected_seq {
             let expected = prev.wrapping_add(1);
             if packet.seq != expected {
@@ -88,73 +104,108 @@ pub fn gcs_receiver(
         }
         expected_seq = Some(packet.seq);
 
-        let timestamp = now_ms();
+        let now = now_ms();
+        let latency_ms = now.saturating_sub(packet.timestamp_ms as u128);
 
         match packet.msg_type {
             MessageType::Telemetry => {
                 let payload = &packet.payload[..packet.payload_len as usize];
 
-                let msg = match decode_status(payload) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        eprintln!("Thermal status decode failed: {}", e);
+                if payload.is_empty() {
+                    eprintln!("Empty telemetry payload");
+                    continue;
+                }
+
+                match payload[0] {
+                    3 => match decode_status(payload) {
+                        Ok(ThermalToComm::Status(s)) => {
+                            update_system_state_from_thermal(
+                                &system_state,
+                                ThermalToComm::Status(s),
+                                packet.seq,
+                            );
+
+                            println!(
+                                "[Status] seq={} temp={:.2}°C target={:.2}°C",
+                                packet.seq,
+                                s.temp_x10 as f32 / 10.0,
+                                s.target_temp_x10 as f32 / 10.0
+                            );
+
+                            let mut logger = telemetry_logger.lock().unwrap();
+                            log_telemetry(
+                                &mut logger,
+                                now_ms(),
+                                packet.seq,
+                                s.temp_x10 as f32 / 10.0,
+                                s.target_temp_x10 as f32 / 10.0,
+                                0,
+                                "STATUS",
+                            );
+                        }
+                        Ok(_) => {
+                            eprintln!("Unexpected telemetry variant");
+                            continue;
+                        }
+                        Err(e) => {
+                            eprintln!("Thermal status decode failed: {}", e);
+                            continue;
+                        }
+                    },
+
+                    1 => {
+                        println!("[Gyro] seq={} received", packet.seq);
+                    }
+
+                    2 => {
+                        println!("[Battery] seq={} received", packet.seq);
+                    }
+
+                    other => {
+                        eprintln!("Unknown telemetry subtype: {}", other);
                         continue;
                     }
-                };
-
-                update_system_state_from_thermal(&system_state, msg, packet.seq);
-
-                if let ThermalToComm::Status(s) = msg {
-                    println!(
-                        "[Status] seq={} temp={:.2}°C",
-                        packet.seq,
-                        s.temp_x10 as f32 / 10.0
-                    );
-
-                    let mut logger = telemetry_logger.lock().unwrap();
-                    log_telemetry(
-                        &mut logger,
-                        timestamp,
-                        packet.seq,
-                        s.temp_x10 as f32 / 10.0,
-                        s.target_temp_x10 as f32 / 10.0,
-                        0,
-                        "STATUS",
-                    );
                 }
             }
 
             MessageType::Fault => {
                 let payload = &packet.payload[..packet.payload_len as usize];
 
-                let msg = match decode_alert(payload) {
-                    Ok(m) => m,
+                match decode_alert(payload) {
+                    Ok(ThermalToComm::Alert(a)) => {
+                        update_system_state_from_thermal(
+                            &system_state,
+                            ThermalToComm::Alert(a),
+                            packet.seq,
+                        );
+
+                        println!(
+                            "[Alert] seq={} {:?} temp={:.2}°C action={:?}",
+                            packet.seq,
+                            a.alert_code,
+                            a.temp_x10 as f32 / 10.0,
+                            a.action_code
+                        );
+
+                        let mut logger = telemetry_logger.lock().unwrap();
+                        log_telemetry(
+                            &mut logger,
+                            now_ms(),
+                            packet.seq,
+                            a.temp_x10 as f32 / 10.0,
+                            0.0,
+                            0,
+                            "ALERT",
+                        );
+                    }
+                    Ok(_) => {
+                        eprintln!("Unexpected fault variant");
+                        continue;
+                    }
                     Err(e) => {
                         eprintln!("Thermal alert decode failed: {}", e);
                         continue;
                     }
-                };
-
-                update_system_state_from_thermal(&system_state, msg, packet.seq);
-
-                if let ThermalToComm::Alert(a) = msg {
-                    println!(
-                        "[Alert] seq={} {:?} temp={:.2}°C",
-                        packet.seq,
-                        a.alert_code,
-                        a.temp_x10 as f32 / 10.0
-                    );
-
-                    let mut logger = telemetry_logger.lock().unwrap();
-                    log_telemetry(
-                        &mut logger,
-                        timestamp,
-                        packet.seq,
-                        a.temp_x10 as f32 / 10.0,
-                        0.0,
-                        0,
-                        "ALERT",
-                    );
                 }
             }
 
@@ -165,11 +216,9 @@ pub fn gcs_receiver(
                     Ok(AckResult::Success) => {
                         println!("[ACK] seq={} SUCCESS", packet.seq);
                     }
-
                     Ok(AckResult::Rejected(reason)) => {
-                        println!("[ACK] seq={} REJECTED reason={:?}", packet.seq, reason);
+                        println!("[ACK] seq={} REJECTED {:?}", packet.seq, reason);
                     }
-
                     Err(e) => {
                         eprintln!("ACK decode failed: {}", e);
                     }
@@ -181,24 +230,21 @@ pub fn gcs_receiver(
             }
 
             MessageType::CommandResponse => {
-                println!("[INFO] Command response received");
+                println!("[CommandResponse] seq={}", packet.seq);
             }
         }
 
-        {
-            let mut logger = system_state_logger.lock().unwrap();
-
-            log_system_state(
-                &mut logger,
-                timestamp,
-                &format!("{:?}", system_state.get_mode()),
-                if system_state.is_overheated() {
-                    "OVERHEAT"
-                } else {
-                    "NORMAL"
-                },
-            );
-        }
+        let mut logger = system_state_logger.lock().unwrap();
+        log_system_state(
+            &mut logger,
+            now,
+            &format!("{:?}", system_state.get_mode()),
+            if system_state.is_overheated() {
+                "OVERHEAT"
+            } else {
+                "NORMAL"
+            },
+        );
     }
 }
 

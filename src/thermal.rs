@@ -88,7 +88,7 @@ pub fn decode_status(payload: &[u8]) -> Result<ThermalToComm, &'static str> {
 }
 
 pub fn decode_alert(payload: &[u8]) -> Result<ThermalToComm, &'static str> {
-    if payload.len() < 10 || payload[0] != 1 {
+    if payload.len() != 10 || payload[0] != 4 {
         return Err("invalid thermal alert payload");
     }
 
