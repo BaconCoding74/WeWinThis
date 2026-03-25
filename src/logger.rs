@@ -94,6 +94,24 @@ pub fn log_critical_alert(
     ));
 }
 
+pub fn log_decode_latency(
+    logger: &mut Logger,
+    timestamp: u128,
+    data_type: &str,
+    decode_latency_ms: f32,
+    threshold_ms: f32,
+) {
+    let status = if decode_latency_ms > threshold_ms {
+        "EXCEEDS_THRESHOLD"
+    } else {
+        "OK"
+    };
+    logger.log(&format!(
+        "{},{},{:.3},{},{:.3}",
+        timestamp, data_type, decode_latency_ms, status, threshold_ms
+    ));
+}
+
 pub fn now_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

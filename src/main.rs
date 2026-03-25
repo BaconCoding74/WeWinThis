@@ -8,7 +8,7 @@ mod system_state;
 mod telemetry;
 mod thermal;
 
-use std::{sync::Arc, thread, time::Duration};
+use std::{sync::atomic::AtomicU32, sync::Arc, thread, time::Duration};
 
 use crate::{
     gcs::{create_shared_loggers, gcs_scheduler, tcp_listener},
@@ -21,10 +21,14 @@ fn main() {
     let (command_logger, telemetry_logger, system_state_logger, performance_logger, fault_logger) =
         create_shared_loggers();
 
+    let telemetry_backlog = Arc::new(AtomicU32::new(0));
+
     let state_receiver = Arc::clone(&system_state);
     let telemetry_logger_clone = Arc::clone(&telemetry_logger);
     let system_state_logger_clone = Arc::clone(&system_state_logger);
     let fault_logger_clone = Arc::clone(&fault_logger);
+    let performance_logger_clone = Arc::clone(&performance_logger);
+    let backlog_clone = Arc::clone(&telemetry_backlog);
 
     thread::spawn(move || {
         tcp_listener(
@@ -32,6 +36,8 @@ fn main() {
             telemetry_logger_clone,
             system_state_logger_clone,
             fault_logger_clone,
+            performance_logger_clone,
+            backlog_clone,
         );
     });
 

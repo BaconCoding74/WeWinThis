@@ -2,7 +2,7 @@ use crate::thermal::{decode_status, ThermalStatusMsg, ThermalToComm};
 
 #[derive(Debug, Clone, Copy)]
 pub struct GyroMsg {
-    pub timestamp_ms: u32,
+    pub _timestamp_ms: u32,
     pub x_mdps: i16,
     pub y_mdps: i16,
     pub z_mdps: i16,
@@ -10,7 +10,7 @@ pub struct GyroMsg {
 
 #[derive(Debug, Clone, Copy)]
 pub struct BatteryMsg {
-    pub timestamp_ms: u32,
+    pub _timestamp_ms: u32,
     pub ma: i16,
     pub mv: i16,
     pub pct: u8,
@@ -41,7 +41,7 @@ pub fn decode_telemetry(payload: &[u8]) -> Result<TelemetryData, &'static str> {
             let z = i16::from_le_bytes(payload[9..11].try_into().unwrap());
 
             Ok(TelemetryData::Gyro(GyroMsg {
-                timestamp_ms: timestamp,
+                _timestamp_ms: timestamp,
                 x_mdps: x,
                 y_mdps: y,
                 z_mdps: z,
@@ -60,7 +60,7 @@ pub fn decode_telemetry(payload: &[u8]) -> Result<TelemetryData, &'static str> {
             let pct = payload[9];
 
             Ok(TelemetryData::Battery(BatteryMsg {
-                timestamp_ms: timestamp,
+                _timestamp_ms: timestamp,
                 ma,
                 mv,
                 pct,

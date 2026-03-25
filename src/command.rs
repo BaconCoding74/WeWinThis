@@ -94,7 +94,7 @@ impl CommandScheduler {
         let should_run = self
             .queue
             .front()
-            .map_or(false, |front| now >= front.scheduled_time);
+            .is_some_and(|front| now >= front.scheduled_time);
 
         if should_run {
             let cmd = self.queue.pop_front().unwrap();

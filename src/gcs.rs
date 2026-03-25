@@ -3,6 +3,7 @@ use std::{
     io::Read,
     net::{TcpListener, TcpStream},
     path::PathBuf,
+    sync::atomic::{AtomicU32, Ordering},
     sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
@@ -12,7 +13,9 @@ use crate::{
     command::CommandScheduler,
     command_schedule::build_command_schedule,
     constants::{LOCALHOST, LOG_DIR, PACKET_SIZE, RECEIVER_PORT},
-    logger::{log_fault, log_jitter, log_system_state, log_telemetry, now_ms, Logger},
+    logger::{
+        log_decode_latency, log_fault, log_jitter, log_system_state, log_telemetry, now_ms, Logger,
+    },
     network::{decode_ack, decode_packet, AckResult, MessageType},
     system_state::SystemState,
     telemetry::{decode_telemetry, TelemetryData},
@@ -24,6 +27,8 @@ pub fn tcp_listener(
     telemetry_logger: Arc<Mutex<Logger>>,
     system_state_logger: Arc<Mutex<Logger>>,
     fault_logger: Arc<Mutex<Logger>>,
+    performance_logger: Arc<Mutex<Logger>>,
+    telemetry_backlog: Arc<AtomicU32>,
 ) {
     let listener =
         TcpListener::bind((LOCALHOST, RECEIVER_PORT)).expect("Failed to bind TCP listener");
@@ -39,6 +44,8 @@ pub fn tcp_listener(
                 let telemetry_logger_clone = Arc::clone(&telemetry_logger);
                 let system_state_logger_clone = Arc::clone(&system_state_logger);
                 let fault_logger_clone = Arc::clone(&fault_logger);
+                let performance_logger_clone = Arc::clone(&performance_logger);
+                let backlog_clone = Arc::clone(&telemetry_backlog);
 
                 thread::spawn(move || {
                     gcs_receiver(
@@ -47,6 +54,8 @@ pub fn tcp_listener(
                         telemetry_logger_clone,
                         system_state_logger_clone,
                         fault_logger_clone,
+                        performance_logger_clone,
+                        backlog_clone,
                     );
                 });
             }
@@ -63,11 +72,16 @@ pub fn gcs_receiver(
     telemetry_logger: Arc<Mutex<Logger>>,
     system_state_logger: Arc<Mutex<Logger>>,
     fault_logger: Arc<Mutex<Logger>>,
+    performance_logger: Arc<Mutex<Logger>>,
+    telemetry_backlog: Arc<AtomicU32>,
 ) {
     let mut buffer = [0u8; PACKET_SIZE];
     let mut expected_seq: Option<u32> = None;
     let mut consecutive_misses: u32 = 0;
     let mut contact_lost = false;
+    let mut last_packet_time: Option<Instant> = None;
+    let expected_interval_ms: u128 = 100;
+    let mut last_backlog_log = Instant::now();
 
     loop {
         let n = match stream.read(&mut buffer) {
@@ -94,6 +108,8 @@ pub fn gcs_receiver(
                 continue;
             }
         };
+
+        telemetry_backlog.fetch_add(1, Ordering::Release);
 
         // Sequence check - track missing packets
         if let Some(prev) = expected_seq {
@@ -143,10 +159,43 @@ pub fn gcs_receiver(
         let now = now_ms();
         let latency_ms = now.saturating_sub(packet.timestamp_ms as u128);
 
+        let reception_drift_ms = if let Some(last_time) = last_packet_time {
+            let actual_interval = last_time.elapsed().as_millis();
+            if actual_interval > 0 {
+                let drift = actual_interval.saturating_sub(expected_interval_ms);
+                if drift > 10 {
+                    eprintln!(
+                        "[RECEPTION DRIFT] seq={} interval={}ms expected={}ms drift={}ms",
+                        packet.seq, actual_interval, expected_interval_ms, drift
+                    );
+                }
+                drift
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
+        last_packet_time = Some(Instant::now());
+
+        if reception_drift_ms > 0 {
+            let mut perf_log = performance_logger.lock().unwrap();
+            log_jitter(
+                &mut perf_log,
+                now,
+                "telemetry_reception",
+                expected_interval_ms,
+                last_packet_time.map_or(0, |t| t.elapsed().as_millis()),
+                reception_drift_ms,
+            );
+        }
+
         match packet.msg_type {
             MessageType::Telemetry => {
                 let payload = &packet.payload[..packet.payload_len as usize];
 
+                let decode_start = Instant::now();
                 let data = match decode_telemetry(payload) {
                     Ok(d) => d,
                     Err(e) => {
@@ -154,8 +203,28 @@ pub fn gcs_receiver(
                         continue;
                     }
                 };
+                let decode_latency_us = decode_start.elapsed().as_micros();
+                let decode_latency_ms = decode_latency_us as f32 / 1000.0;
+
+                if decode_latency_ms > 3.0 {
+                    eprintln!(
+                        "[WARN] Decode latency {:.3}ms exceeds 3ms threshold!",
+                        decode_latency_ms
+                    );
+                }
 
                 let now = now_ms();
+
+                let data_type_str = match data {
+                    TelemetryData::Gyro(_) => "GYRO",
+                    TelemetryData::Battery(_) => "BATTERY",
+                    TelemetryData::Thermal(_) => "THERMAL",
+                };
+
+                {
+                    let mut perf_log = performance_logger.lock().unwrap();
+                    log_decode_latency(&mut perf_log, now, data_type_str, decode_latency_ms, 3.0);
+                }
                 let mut logger = telemetry_logger.lock().unwrap();
 
                 match data {
@@ -230,7 +299,7 @@ pub fn gcs_receiver(
                             "Thermal alert decode failed: {} | len={} first_byte={}",
                             e,
                             payload.len(),
-                            payload.get(0).unwrap_or(&0)
+                            payload.first().copied().unwrap_or(0)
                         );
                         continue;
                     }
@@ -300,6 +369,28 @@ pub fn gcs_receiver(
                 "NORMAL"
             },
         );
+
+        telemetry_backlog.fetch_sub(1, Ordering::Release);
+
+        if last_backlog_log.elapsed().as_millis() >= 1000 {
+            let backlog_count = telemetry_backlog.load(Ordering::Acquire);
+            if backlog_count > 0 {
+                eprintln!(
+                    "[WARN] Telemetry backlog: {} packets pending",
+                    backlog_count
+                );
+            }
+            let mut perf_log = performance_logger.lock().unwrap();
+            log_jitter(
+                &mut perf_log,
+                now_ms(),
+                "telemetry_backlog",
+                0,
+                backlog_count as u128,
+                backlog_count as u128,
+            );
+            last_backlog_log = Instant::now();
+        }
     }
 }
 
@@ -325,9 +416,13 @@ pub fn gcs_scheduler(
 
     let mut last_run = Instant::now();
     let mut iteration: u128 = 0;
+    let mut total_active_time_us: u128 = 0;
+    let mut total_idle_time_us: u128 = 0;
+    let mut last_cpu_log = Instant::now();
 
     loop {
-        let now = Instant::now();
+        let loop_start = Instant::now();
+        let now = loop_start;
 
         let actual_interval = now.duration_since(last_run);
         last_run = now;
@@ -359,7 +454,45 @@ pub fn gcs_scheduler(
             );
         }
 
+        let after_work = Instant::now();
+        let active_time = after_work.duration_since(loop_start).as_micros();
+        total_active_time_us += active_time;
+
         thread::sleep(Duration::from_millis(1));
+
+        let after_sleep = Instant::now();
+        let idle_time = after_sleep.duration_since(after_work).as_micros();
+        total_idle_time_us += idle_time;
+
+        if last_cpu_log.elapsed().as_millis() >= 1000 {
+            let total_time_us = total_active_time_us + total_idle_time_us;
+            let cpu_utilization = if total_time_us > 0 {
+                (total_active_time_us as f64 / total_time_us as f64 * 100.0) as u32
+            } else {
+                0
+            };
+
+            println!(
+                "[CPU] Utilization: {}% (active: {}ms, idle: {}ms)",
+                cpu_utilization,
+                total_active_time_us / 1000,
+                total_idle_time_us / 1000
+            );
+
+            let mut perf_logger = performance_logger.lock().unwrap();
+            log_jitter(
+                &mut perf_logger,
+                now_ms(),
+                "cpu_utilization",
+                100,
+                cpu_utilization as u128,
+                0,
+            );
+
+            total_active_time_us = 0;
+            total_idle_time_us = 0;
+            last_cpu_log = Instant::now();
+        }
     }
 }
 

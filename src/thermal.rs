@@ -27,19 +27,19 @@ pub enum ThermalActionCode {
 
 #[derive(Debug, Clone, Copy)]
 pub struct ThermalStatusMsg {
-    pub timestamp_ms: u32,
+    pub _timestamp_ms: u32,
     pub temp_x10: i16,
     pub target_temp_x10: i16,
-    pub actuator_pct: u8,
-    pub flags: u8,
+    pub _actuator_pct: u8,
+    pub _flags: u8,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct ThermalAlertMsg {
-    pub timestamp_ms: u32,
+    pub _timestamp_ms: u32,
     pub alert_code: ThermalAlertCode,
     pub temp_x10: i16,
-    pub flags: u8,
+    pub _flags: u8,
     pub action_code: ThermalActionCode,
 }
 
@@ -69,11 +69,11 @@ pub fn decode_status(payload: &[u8]) -> Result<ThermalToComm, &'static str> {
     let flags = payload[10];
 
     Ok(ThermalToComm::Status(ThermalStatusMsg {
-        timestamp_ms,
+        _timestamp_ms: timestamp_ms,
         temp_x10,
         target_temp_x10,
-        actuator_pct,
-        flags,
+        _actuator_pct: actuator_pct,
+        _flags: flags,
     }))
 }
 
@@ -108,10 +108,10 @@ pub fn decode_alert(payload: &[u8]) -> Result<ThermalToComm, &'static str> {
     };
 
     Ok(ThermalToComm::Alert(ThermalAlertMsg {
-        timestamp_ms,
+        _timestamp_ms: timestamp_ms,
         alert_code,
         temp_x10,
-        flags,
+        _flags: flags,
         action_code,
     }))
 }
