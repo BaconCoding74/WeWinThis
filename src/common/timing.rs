@@ -19,7 +19,7 @@ pub fn task_timing(task_id: TaskId) -> TaskTiming {
 
         TaskId::CommandExec => TaskTiming {
             period: Duration::from_millis(20),
-            deadline: Duration::from_millis(10),
+            deadline: Duration::from_millis(15),
             priority: 2,
         },
 

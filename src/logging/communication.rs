@@ -1,12 +1,4 @@
-
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CommLogLevel {
-    Info = 0,
-    Warn = 1,
-    Error = 2,
-    Critical = 3,
-}
+use crate::logging::default::LogLevel;
 
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,11 +14,15 @@ pub enum CommLogCode {
     SocketError = 2009,
     ContactLost = 2010,
     RerequestSent = 2011,
+    CommandResponseSent = 2012,
+    DownlinkPrepReady = 2013,
+    UplinkEnqueued = 2014,
+    UplinkQueueFull = 2015,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct CommLogRecord {
-    pub level: CommLogLevel,
+    pub level: LogLevel,
     pub timestamp_ms: u32,
     pub code: CommLogCode,
     pub value: i32,

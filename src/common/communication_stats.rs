@@ -1,10 +1,14 @@
 use std::time::{Duration, Instant};
 use crate::common::metrics::duration_div;
+use crate::config::{COMM_RESPONSE_DEADLINE, DOWNLINK_PREP_BUDGET};
 
 #[derive(Debug)]
 pub struct CommunicationStats {
     packet_received: u64,
     packet_sent: u64,
+
+    log_dropped: u64,
+    command_dropped: u64,
 
     bad_packets: u64,
     command_rejected: u64,
@@ -31,10 +35,15 @@ pub struct CommunicationStats {
     total_command_response_sent_latency: Duration,
     max_command_response_sent_latency: Duration,
     min_command_response_sent_latency: Duration,
+    command_response_deadline_count: u64,
 
     total_downlink_late_latency: Duration,
     max_downlink_late_latency: Duration,
     min_downlink_late_latency: Duration,
+
+    total_downlink_prep_latency: Duration,
+    max_downlink_prep_latency: Duration,
+    min_downlink_prep_latency: Duration,
 }
 
 impl CommunicationStats {
@@ -42,6 +51,9 @@ impl CommunicationStats {
         Self {
             packet_received: 0,
             packet_sent: 0,
+
+            log_dropped: 0,
+            command_dropped: 0,
 
             bad_packets: 0,
             command_rejected: 0,
@@ -64,16 +76,25 @@ impl CommunicationStats {
             total_response_queue_latency: Duration::ZERO,
             max_response_queue_latency: Duration::ZERO,
             min_response_queue_latency: Duration::MAX,
-
+            
             total_command_response_sent_latency: Duration::ZERO,
             max_command_response_sent_latency: Duration::ZERO,
             min_command_response_sent_latency: Duration::MAX,
+            command_response_deadline_count: 0,
 
             total_downlink_late_latency: Duration::ZERO,
             max_downlink_late_latency: Duration::ZERO,
             min_downlink_late_latency: Duration::MAX,
+
+            total_downlink_prep_latency: Duration::ZERO,
+            max_downlink_prep_latency: Duration::ZERO,
+            min_downlink_prep_latency: Duration::MAX,
         }
     }
+
+    pub fn record_log_dropped(&mut self) {self.log_dropped += 1;}
+
+    pub fn record_command_dropped(&mut self) {self.command_dropped += 1;}
 
     pub fn record_packet_received(&mut self) {
         self.packet_received += 1;
@@ -89,6 +110,24 @@ impl CommunicationStats {
         self.total_packet_downlink_latency += latency;
         self.max_packet_downlink_latency = self.max_packet_downlink_latency.max(latency);
         self.min_packet_downlink_latency = self.min_packet_downlink_latency.min(latency);
+    }
+
+    pub fn record_downlink_prep(&mut self, window_open_at: Instant, sent_at: Instant) {
+        let latency = sent_at.duration_since(window_open_at);
+
+        if latency > self.max_downlink_prep_latency {
+            self.max_downlink_prep_latency = latency;
+        }
+
+        if self.min_downlink_prep_latency.is_zero() || latency < self.min_downlink_prep_latency {
+            self.min_downlink_prep_latency = latency;
+        }
+
+        self.total_downlink_prep_latency += latency;
+
+        if latency > DOWNLINK_PREP_BUDGET {
+            self.downlink_late += 1;
+        }
     }
 
     pub fn record_bad_packet(&mut self) {
@@ -150,6 +189,10 @@ impl CommunicationStats {
         let end_to_end = sent_at
             .checked_duration_since(cmd_rx_at)
             .unwrap_or(Duration::ZERO);
+        
+        if end_to_end > COMM_RESPONSE_DEADLINE {
+            self.command_response_deadline_count += 1;
+        }
 
         self.total_command_response_sent_latency += end_to_end;
         self.max_command_response_sent_latency =
@@ -285,10 +328,17 @@ impl CommunicationStats {
                 .saturating_sub(self.effective_min_downlink_late_latency())
         }
     }
+
+    fn downlink_prep_jitter(&self) -> Duration {
+        self.max_downlink_late_latency.saturating_sub(self.min_downlink_prep_latency)
+    }
 }
 
-pub fn print_comm_report(name: &str, stats: &CommunicationStats) {
-    println!("Communication Task {name}");
+pub fn print_comm_report(stats: &CommunicationStats) {
+    println!("Communication Task");
+    println!("  cmd -> response deadline        : {:?}", COMM_RESPONSE_DEADLINE);
+    println!("  command dropped                 : {:?}", stats.command_dropped);
+    println!("  log dropped                     : {:?}", stats.log_dropped);
 
     println!("  packet_received                 : {}", stats.packet_received);
     println!("  packet_sent                     : {}", stats.packet_sent);
@@ -320,9 +370,14 @@ pub fn print_comm_report(name: &str, stats: &CommunicationStats) {
     println!("  max cmd->response sent latency  : {:?}", stats.max_command_response_sent_latency);
     println!("  min cmd->response sent latency  : {:?}", stats.effective_min_command_response_sent_latency());
     println!("  cmd->response sent jitter       : {:?}", stats.command_response_sent_jitter());
+    println!("  cmd->response sent deadline miss: {:?}", stats.command_response_deadline_count);
 
     println!("  avg downlink late latency       : {:?}", stats.avg_downlink_late_latency());
     println!("  max downlink late latency       : {:?}", stats.max_downlink_late_latency);
     println!("  min downlink late latency       : {:?}", stats.effective_min_downlink_late_latency());
     println!("  downlink late jitter            : {:?}", stats.downlink_late_jitter());
+
+    println!("  max downlink prep latency       : {:?}", stats.max_downlink_prep_latency);
+    println!("  min downlink prep latency       : {:?}", stats.min_downlink_prep_latency);
+    println!("  downlink prep jitter            : {:?}", stats.downlink_prep_jitter());
 }

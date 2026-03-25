@@ -16,6 +16,9 @@ pub enum CommandCode {
 pub enum CommandRejectReason {
     Invalid = 1,
     AlreadyNormal = 2,
+    QueueFull = 3,
+    None = 4,
+    SystemStopped = 5,
 }
 
 
@@ -37,7 +40,6 @@ pub struct UplinkCommand {
     pub rx_instant: Instant,
     pub seq: u32,
     pub code: CommandCode,
-    pub arg_i16: i16,
 }
 
 pub fn decode_command_packet(pkt: Packet) -> Result<UplinkCommand, &'static str> {
@@ -45,19 +47,16 @@ pub fn decode_command_packet(pkt: Packet) -> Result<UplinkCommand, &'static str>
         return Err("not a command packet");
     }
 
-    if pkt.payload_len < 4 {
+    if pkt.payload_len < 1 {
         return Err("command payload too short");
     }
 
     let code = CommandCode::try_from(pkt.payload[0])?;
-    let arg_i16 = i16::from_le_bytes([pkt.payload[1], pkt.payload[2]]);
-    let _flags = pkt.payload[3];
 
     Ok(UplinkCommand {
         rx_instant: Instant::now(),
         seq: pkt.seq,
         code,
-        arg_i16,
     })
 }
 
@@ -70,14 +69,13 @@ pub fn command_response_to_packet(
     let mut payload = [0u8; COMM_PAYLOAD_SIZE];
     payload[0] = cmd.code as u8;
     payload[1] = result_code;
-    payload[2..4].copy_from_slice(&cmd.arg_i16.to_le_bytes());
-    payload[4..8].copy_from_slice(&cmd.seq.to_le_bytes());
+    payload[2..6].copy_from_slice(&cmd.seq.to_le_bytes());
 
     let packet = Packet {
         msg_type: MessageType::CommandResponse,
         seq: tx_seq,
         timestamp_ms: 0,
-        payload_len: 8,
+        payload_len: 6,
         payload,
     };
 

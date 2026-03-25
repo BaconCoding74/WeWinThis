@@ -1,5 +1,15 @@
 use crate::config::{DEFAULT_MAX_TEMP_X10, DEFAULT_TARGET_TEMP_X10};
 
+#[derive(Default)]
+pub struct ThermalStats {
+    pub dropped_samples: u32,
+    pub dropped_alerts: u32,
+    pub dropped_logs: u32,
+    pub dropped_critical_logs: u32,
+    pub alerts_raised: u32,
+    pub injected_faults: u32,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ThermalSample {
     pub seq: u64,
@@ -26,6 +36,7 @@ pub enum ThermalActionCode {
     ReduceCooling = 3,
     EmergencyShutdown = 4,
     ResumeNormal = 5,
+    MissionAbort = 6,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -59,6 +70,9 @@ pub struct ThermalState {
     pub missed_cycles: u8,
     pub safety_alert: bool,
     pub overheat: bool,
+
+    pub sensor_fault_active: bool,
+    pub recovery_started_ms: u32,
 }
 
 impl ThermalState {
@@ -69,6 +83,9 @@ impl ThermalState {
             missed_cycles: 0,
             safety_alert: false,
             overheat: false,
+
+            sensor_fault_active: false,
+            recovery_started_ms: 0,
         }
     }
 }

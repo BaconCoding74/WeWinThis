@@ -7,6 +7,7 @@ pub struct CommandStats {
     commands_executed: u64,
     responses_enqueued: u64,
     response_drops: u64,
+    log_drops: u64,
 
     total_exec_latency: Duration,
     max_exec_latency: Duration,
@@ -24,6 +25,7 @@ impl CommandStats {
             commands_executed: 0,
             responses_enqueued: 0,
             response_drops: 0,
+            log_drops: 0,
 
             total_exec_latency: Duration::ZERO,
             max_exec_latency: Duration::ZERO,
@@ -34,6 +36,8 @@ impl CommandStats {
             min_response_latency: Duration::MAX,
         }
     }
+
+    pub fn record_log_dropped(&mut self) {self.log_drops +=1; }
 
     pub fn record_received(&mut self) {
         self.commands_received += 1;
@@ -119,11 +123,12 @@ impl CommandStats {
 
 pub fn print_command_report(name: &str, stats: &CommandStats) {
     println!("Command Task {name}");
+    println!("  log drops             : {}", stats.log_drops);
 
     println!("  received              : {}", stats.commands_received);
     println!("  executed              : {}", stats.commands_executed);
-    println!("  responses_enqueued    : {}", stats.responses_enqueued);
-    println!("  response_drops        : {}", stats.response_drops);
+    println!("  responses enqueued    : {}", stats.responses_enqueued);
+    println!("  response drops        : {}", stats.response_drops);
 
     println!("  avg exec latency      : {:?}", stats.avg_exec_latency());
     println!("  max exec latency      : {:?}", stats.max_exec_latency);

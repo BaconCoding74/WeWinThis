@@ -7,3 +7,5 @@ pub mod sensors;
 pub mod packet;
 pub mod command_stats;
 pub mod communication_stats;
+pub mod cpu_stats;
+pub mod scheduler_stats;

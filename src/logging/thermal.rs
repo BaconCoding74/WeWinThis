@@ -10,6 +10,11 @@ pub enum ThermalLogCode {
     DeadlineMiss = 5,
     StatusDropped = 6,
     AlertDropped = 7,
+    RecoveryStarted = 8,
+    RecoveryCompleted = 9,
+    RecoveryTimeout = 10,
+    MissionAborted = 11,
+    FaultInjected = 12,
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -6,7 +6,7 @@ use crate::thermal_control::structs::{ThermalAlertMsg, ThermalStatusMsg, Thermal
 
 pub fn sensor_to_packet(msg: SensorData, enqueued_at: Instant, seq: u32) -> DownlinkItem {
     let mut payload = [0u8; COMM_PAYLOAD_SIZE];
-    let mut packet: Packet;
+    let packet: Packet;
 
     match msg {
         SensorData::Gyro(GyroMsg {
@@ -61,7 +61,7 @@ pub fn sensor_to_packet(msg: SensorData, enqueued_at: Instant, seq: u32) -> Down
 
 pub fn thermal_to_packet(msg: ThermalToComm, enqueued_at: Instant, seq: u32) -> DownlinkItem {
     let mut payload = [0u8; COMM_PAYLOAD_SIZE];
-    let mut packet: Packet;
+    let packet: Packet;
 
     match msg {
         ThermalToComm::Status(ThermalStatusMsg {

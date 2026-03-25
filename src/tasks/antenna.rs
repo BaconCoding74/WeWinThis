@@ -2,31 +2,64 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 use crate::common::metrics::elapsed_ms_u32;
+use crate::common::scheduler_stats::SchedulerStats;
 use crate::common::system_state::{SystemMode, SystemState};
 use crate::config::{AntLogSPSCBuffer, DEGRADED_READY_THRESHOLD_DEG, DEGRADED_STEP_DEG, NORMAL_READY_THRESHOLD_DEG, NORMAL_STEP_DEG};
-use crate::logging::antenna::AntennaLogRecord;
+use crate::logging::antenna::{AntennaLogCode, AntennaLogRecord};
+use crate::logging::default::LogLevel;
+
+#[inline]
+fn push_antenna_log(
+    antenna_log_q: &AntLogSPSCBuffer,
+    scheduler_stats: &mut SchedulerStats,
+    start_time: Instant,
+    level: LogLevel,
+    code: AntennaLogCode,
+    target_deg: i16,
+    current_deg: i16,
+    error_deg: i16,
+    applied_step_deg: i16,
+    ready: bool,
+) {
+    if antenna_log_q.push(AntennaLogRecord {
+        level,
+        timestamp_ms: elapsed_ms_u32(start_time),
+        code,
+        target_deg,
+        current_deg,
+        error_deg,
+        applied_step_deg,
+        ready,
+    }).is_err() {
+        scheduler_stats.antenna_log_dropped = scheduler_stats.antenna_log_dropped.saturating_add(1);
+    }
+}
 
 pub fn run_antenna_alignment_job(
     start_time: Instant,
     system_state: &Arc<SystemState>,
     antenna_log_q: &AntLogSPSCBuffer,
+    scheduler_stats: &mut SchedulerStats,
 ) {
 
-    let now_ms = elapsed_ms_u32(start_time);
     let prev_ready = system_state.antenna_ready.load(Ordering::Acquire);
     let current = system_state.antenna_current_deg.load(Ordering::Acquire);
     let target = system_state.antenna_target_deg.load(Ordering::Acquire);
 
     if !system_state.antenna_align_enabled.load(Ordering::Acquire) && prev_ready {
         system_state.antenna_ready.store(false, Ordering::Release);
-        let _ = antenna_log_q.push(AntennaLogRecord {
-            timestamp_ms: now_ms,
-            target_deg: target,
-            current_deg: current,
-            error_deg: target - current,
-            applied_step_deg: 0,
-            ready: false,
-        });
+        push_antenna_log(
+            antenna_log_q,
+            scheduler_stats,
+            start_time,
+            LogLevel::Warn,
+            AntennaLogCode::AlignmentDisabled,
+            target,
+            current,
+            target - current,
+            0,
+            false,
+        );
         return;
     }
 
@@ -52,14 +85,18 @@ pub fn run_antenna_alignment_job(
         system_state.antenna_ready.store(ready, Ordering::Release);
 
         if prev_ready != ready {
-            let _ = antenna_log_q.push(AntennaLogRecord {
-                timestamp_ms: now_ms,
-                target_deg: target,
-                current_deg: current,
-                error_deg: 0,
-                applied_step_deg: 0,
+            push_antenna_log(
+                antenna_log_q,
+                scheduler_stats,
+                start_time,
+                LogLevel::Info,
+                AntennaLogCode::TargetReached,
+                target,
+                current,
+                0,
+                0,
                 ready,
-            });
+            );
         }
 
         return;
@@ -78,15 +115,25 @@ pub fn run_antenna_alignment_job(
 
     let new_error = target - new_angle;
     let ready = new_error.abs() <= ready_threshold;
-
     system_state.antenna_ready.store(ready, Ordering::Release);
 
-    let _ = antenna_log_q.push(AntennaLogRecord {
-        timestamp_ms: now_ms,
-        target_deg: target,
-        current_deg: new_angle,
-        error_deg: new_error,
-        applied_step_deg: step,
+    let code = if prev_ready != ready {
+        AntennaLogCode::ReadyChanged
+    }
+    else {
+        AntennaLogCode::StepApplied
+    };
+
+    push_antenna_log(
+        antenna_log_q,
+        scheduler_stats,
+        start_time,
+        LogLevel::Info,
+        code,
+        target,
+        new_angle,
+        new_error,
+        step,
         ready,
-    });
+    );
 }

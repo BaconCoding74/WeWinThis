@@ -5,8 +5,8 @@ use crate::common::tasks::TaskId;
 pub struct Job {
     pub id: TaskId,
     pub priority: u8,
-    pub release_tick: u64,
     pub seq: u64,
+    pub release_tick: u64,
     pub released_at: Instant,
     pub expected_at: Instant,
     pub deadline_at: Instant,

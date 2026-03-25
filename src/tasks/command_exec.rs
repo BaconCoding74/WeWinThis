@@ -4,15 +4,43 @@ use crate::common::command_stats::CommandStats;
 use crate::common::metrics::elapsed_ms_u32;
 use crate::common::packet::{MessageType, Packet};
 use crate::common::system_state::{SystemMode, SystemState};
-use crate::config::{DownlinkSPSCBuffer, SchedulerLogSPSCBuffer, UplinkSPSCBuffer, COMM_PAYLOAD_SIZE, MAX_COMMANDS_PER_RUN};
+use crate::config::{CommandLogSPSCBuffer, DownlinkSPSCBuffer, SchedulerLogSPSCBuffer, UplinkSPSCBuffer, COMM_PAYLOAD_SIZE, MAX_COMMANDS_PER_RUN};
+use crate::logging::command::{CommandLogCode, CommandLogRecord, CommandLogRejectReason};
 use crate::logging::default::{LogLevel, LogRecord, LogSource};
 use crate::protocol::command_packet::{command_response_to_packet, CommandCode};
+
+#[inline]
+fn push_cmd_log(
+    cmd_log_q: &CommandLogSPSCBuffer,
+    cmd_stats: &mut CommandStats,
+    start_time: Instant,
+    level: LogLevel,
+    code: CommandLogCode,
+    cmd_seq: u32,
+    cmd_type: u8,
+    reject_reason: CommandLogRejectReason,
+    value: i32,
+) {
+    let record = CommandLogRecord {
+        level,
+        timestamp_ms: elapsed_ms_u32(start_time),
+        code,
+        cmd_seq,
+        cmd_type,
+        reject_reason,
+        value,
+    };
+    
+    if cmd_log_q.push(record).is_err() {
+        cmd_stats.record_log_dropped();
+    };
+}
 
 pub fn run_command_exec_job(
     uplink_q: &UplinkSPSCBuffer,
     downlink_q: &DownlinkSPSCBuffer,
     system_state: &Arc<SystemState>,
-    cmd_log_q: &SchedulerLogSPSCBuffer,
+    cmd_log_q: &CommandLogSPSCBuffer,
     cmd_stats: &mut CommandStats,
     tx_seq: &mut u64,
 ) {
@@ -30,24 +58,32 @@ pub fn run_command_exec_job(
         match cmd.code {
             CommandCode::SetNormal => {
                 system_state.set_mode(SystemMode::Normal);
-                let _ = cmd_log_q.push(LogRecord {
-                    source: LogSource::CommandExec,
-                    level: LogLevel::Info,
-                    timestamp_ms: elapsed_ms_u32(exec_start),
-                    code: 1003,
-                    value: 0,
-                });
+                push_cmd_log(
+                    cmd_log_q,
+                    cmd_stats,
+                    exec_start,
+                    LogLevel::Info,
+                    CommandLogCode::ModeSetNormal,
+                    cmd.seq,
+                    cmd.code as u8,
+                    CommandLogRejectReason::None,
+                    0,
+                );
             }
 
             CommandCode::SetDegraded => {
                 system_state.set_mode(SystemMode::Degraded);
-                let _ = cmd_log_q.push(LogRecord {
-                    source: LogSource::CommandExec,
-                    level: LogLevel::Info,
-                    timestamp_ms: elapsed_ms_u32(exec_start),
-                    code: 1004,
-                    value: 0,
-                });
+                push_cmd_log(
+                    cmd_log_q,
+                    cmd_stats,
+                    exec_start,
+                    LogLevel::Info,
+                    CommandLogCode::ModeSetDegraded,
+                    cmd.seq,
+                    cmd.code as u8,
+                    CommandLogRejectReason::None,
+                    0,
+                );
             }
             CommandCode::Ping => {
 
@@ -66,6 +102,18 @@ pub fn run_command_exec_job(
         }
         else {
             cmd_stats.record_response_drop();
+
+            push_cmd_log(
+                cmd_log_q,
+                cmd_stats,
+                exec_start,
+                LogLevel::Error,
+                CommandLogCode::ResponseDropped,
+                cmd.seq,
+                cmd.code as u8,
+                CommandLogRejectReason::ResponseQueueFull,
+                0,
+            );
         }
         handled += 1;
     }

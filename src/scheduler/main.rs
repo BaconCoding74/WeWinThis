@@ -2,15 +2,20 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::{Duration, Instant};
-use crate::common::command_stats::{print_command_report, CommandStats};
+use crate::common::command_stats::{CommandStats};
+use crate::common::cpu_stats::CpuStats;
 use crate::common::job::Job;
-use crate::common::metrics::{duration_div, elapsed_ms_u32, print_task_report};
+use crate::common::metrics::{TaskStats};
+use crate::common::scheduler_stats::SchedulerStats;
 use crate::common::system_state::{SystemState};
 use crate::common::tasks::TaskId;
 use crate::common::timing::{task_timing, TaskRuntime, TaskTiming};
-use crate::config::{AntLogSPSCBuffer, DownlinkSPSCBuffer, HealthLogSPSCBuffer, SchedulerLogSPSCBuffer, SensorSPSCBuffer, ThermalSPSCBuffer, UplinkSPSCBuffer, READY_QUEUE_CAP};
-use crate::logging::default::{LogLevel, LogRecord, LogSource};
+use crate::config::{AntLogSPSCBuffer, CommandLogSPSCBuffer, CompressionLogSPSCBuffer, DownlinkSPSCBuffer, HealthLogSPSCBuffer, SchedulerLogSPSCBuffer, SensorSPSCBuffer, ThermalSPSCBuffer, UplinkSPSCBuffer, READY_QUEUE_CAP};
+use crate::logging::default::{LogLevel};
+use crate::logging::scheduler::SchedulerLogCode;
 use crate::queues::fixed_priority_queue::FixedPriorityQueue;
+use crate::reports::scheduler::SchedulerReport;
+use crate::scheduler::helper::log_scheduler;
 use crate::tasks::antenna::run_antenna_alignment_job;
 use crate::tasks::command_exec::run_command_exec_job;
 use crate::tasks::compression::run_compression_job;
@@ -18,6 +23,7 @@ use crate::tasks::health::run_health_monitor_job;
 use crate::tasks::sensors::run_sensor_job;
 
 fn release_periodic_job(
+    q_stats: &mut SchedulerStats,
     ready_q: &mut FixedPriorityQueue<READY_QUEUE_CAP>,
     log_q: &SchedulerLogSPSCBuffer,
     task_id: TaskId,
@@ -37,23 +43,52 @@ fn release_periodic_job(
         if let Err(_job) = ready_q.push(Job {
             id: task_id,
             priority: timing.priority,
-            release_tick: tick,
             seq: *job_seq,
             released_at,
             expected_at,
             deadline_at,
+            release_tick: tick,
         }) {
-            let _ = log_q.push(LogRecord {
-                source: LogSource::Scheduler,
-                level: LogLevel::Critical,
-                timestamp_ms: elapsed_ms_u32(now),
-                code: 1003,
-                value: 0,
-            });
+            q_stats.job_dropped += 1;
+
+            log_scheduler(
+                q_stats,
+                log_q,
+                now,
+                LogLevel::Error,
+                SchedulerLogCode::ReadyQueueFull,
+                task_id,
+                0,
+            );
         };
 
         *job_seq += 1;
         runtime.next_release += timing.period;
+    }
+}
+
+fn record_task_completion(
+    job_id: TaskId,
+    stats: &mut TaskStats,
+    q_stats: &mut SchedulerStats,
+    log_q: &SchedulerLogSPSCBuffer,
+    deadline: Instant,
+    task_start: Instant,
+) {
+    let finish = Instant::now();
+    let missed = finish > deadline;
+    stats.record_completion(task_start, finish, missed);
+
+    if missed {
+        log_scheduler(
+            q_stats,
+            &log_q,
+            finish,
+            LogLevel::Critical,
+            SchedulerLogCode::CompletionDeadlineMiss,
+            job_id,
+            0,
+        );
     }
 }
 
@@ -63,19 +98,21 @@ pub fn run_scheduler_loop(
     downlink_q: &DownlinkSPSCBuffer,
     uplink_q: &UplinkSPSCBuffer,
     scheduler_log_q: &SchedulerLogSPSCBuffer,
+    command_log_q: &CommandLogSPSCBuffer,
     ant_log_q: &AntLogSPSCBuffer,
     health_log_q: &HealthLogSPSCBuffer,
+    compression_log_q: &CompressionLogSPSCBuffer,
     system_state: Arc<SystemState>
-) {
+) -> SchedulerReport {
     let mut ready_queue = FixedPriorityQueue::<READY_QUEUE_CAP>::new();
     let start_time = Instant::now();
-    let mut total = Duration::ZERO;
-    let mut max_loop_time = Duration::ZERO;
     let mut tick: u64 = 0;
     let mut job_seq: u64 = 0;
     let mut tx_seq: u64 = 0;
 
+    let cpu_stats = CpuStats::new();
     let mut command_stats = CommandStats::new();
+    let mut scheduler_q_stats = SchedulerStats::default();
 
     let gyro_timing = task_timing(TaskId::Gyro);
     let battery_timing = task_timing(TaskId::Battery);
@@ -95,6 +132,7 @@ pub fn run_scheduler_loop(
         let now = Instant::now();
 
         release_periodic_job(
+            &mut scheduler_q_stats,
             &mut ready_queue,
             scheduler_log_q,
             TaskId::Gyro,
@@ -106,6 +144,7 @@ pub fn run_scheduler_loop(
         );
 
         release_periodic_job(
+            &mut scheduler_q_stats,
             &mut ready_queue,
             scheduler_log_q,
             TaskId::Battery,
@@ -117,6 +156,7 @@ pub fn run_scheduler_loop(
         );
 
         release_periodic_job(
+            &mut scheduler_q_stats,
             &mut ready_queue,
             scheduler_log_q,
             TaskId::Compression,
@@ -128,6 +168,7 @@ pub fn run_scheduler_loop(
         );
 
         release_periodic_job(
+            &mut scheduler_q_stats,
             &mut ready_queue,
             scheduler_log_q,
             TaskId::Health,
@@ -139,6 +180,7 @@ pub fn run_scheduler_loop(
         );
 
         release_periodic_job(
+            &mut scheduler_q_stats,
             &mut ready_queue,
             scheduler_log_q,
             TaskId::Antenna,
@@ -150,6 +192,7 @@ pub fn run_scheduler_loop(
         );
 
         release_periodic_job(
+            &mut scheduler_q_stats,
             &mut ready_queue,
             scheduler_log_q,
             TaskId::CommandExec,
@@ -169,126 +212,117 @@ pub fn run_scheduler_loop(
                         uplink_q,
                         downlink_q,
                         &system_state,
-                        scheduler_log_q,
+                        command_log_q,
                         &mut command_stats,
                         &mut tx_seq,
                     );
 
-                    let finish = Instant::now();
-                    let missed = finish > job.deadline_at;
-                    cmd_exec_runtime.stats.record_completion(task_start, finish, missed);
-
-                    if missed {
-                        let _ = scheduler_log_q.push(LogRecord {
-                            source: LogSource::Scheduler,
-                            level: LogLevel::Critical,
-                            timestamp_ms: elapsed_ms_u32(now),
-                            code: 1003,
-                            value: 0,
-                        });
-                    }
+                    record_task_completion(
+                        job.id,
+                        &mut cmd_exec_runtime.stats,
+                        &mut scheduler_q_stats,
+                        scheduler_log_q,
+                        job.deadline_at,
+                        task_start,
+                    );
                 }
                 TaskId::Compression => {
                     run_compression_job(
                         sensor_q,
                         thermal_q,
                         downlink_q,
+                        compression_log_q,
+                        &mut scheduler_q_stats,
+                        task_start,
                         &mut tx_seq,
                     );
 
-                    let finish = Instant::now();
-                    let missed = finish > job.deadline_at;
-                    compression_runtime.stats.record_completion(task_start, finish, missed);
-
-                    if missed {
-                        let _ = scheduler_log_q.push(LogRecord {
-                            source: LogSource::Scheduler,
-                            level: LogLevel::Critical,
-                            timestamp_ms: elapsed_ms_u32(now),
-                            code: 1006,
-                            value: 0,
-                        });
-                    }
+                    record_task_completion(
+                        job.id,
+                        &mut compression_runtime.stats,
+                        &mut scheduler_q_stats,
+                        scheduler_log_q,
+                        job.deadline_at,
+                        task_start,
+                    );
                 }
                 TaskId::Antenna => {
                     run_antenna_alignment_job(
                         task_start,
                         &system_state,
                         ant_log_q,
+                        &mut scheduler_q_stats,
                     );
 
-                    let finish = Instant::now();
-                    let missed = finish > job.deadline_at;
-                    antenna_runtime.stats.record_completion(task_start, finish, missed);
-
-                    if missed {
-                        let _ = scheduler_log_q.push(LogRecord {
-                            source: LogSource::Scheduler,
-                            level: LogLevel::Critical,
-                            timestamp_ms: elapsed_ms_u32(now),
-                            code: 1006,
-                            value: 0,
-                        });
-                    }
+                    record_task_completion(
+                        job.id,
+                        &mut antenna_runtime.stats,
+                        &mut scheduler_q_stats,
+                        scheduler_log_q,
+                        job.deadline_at,
+                        task_start,
+                    );
                 }
                 TaskId::Health => {
                     run_health_monitor_job(
                         start_time,
                         &system_state,
+                        &mut scheduler_q_stats,
                         downlink_q,
                         health_log_q,
                     );
 
-                    let finish = Instant::now();
-                    let missed = finish > job.deadline_at;
-                    health_runtime.stats.record_completion(task_start, finish, missed);
-
-                    if missed {
-                        let _ = scheduler_log_q.push(LogRecord {
-                            source: LogSource::Scheduler,
-                            level: LogLevel::Critical,
-                            timestamp_ms: elapsed_ms_u32(now),
-                            code: 1006,
-                            value: 0,
-                        });
-                    }
+                    record_task_completion(
+                        job.id,
+                        &mut health_runtime.stats,
+                        &mut scheduler_q_stats,
+                        scheduler_log_q,
+                        job.deadline_at,
+                        task_start,
+                    );
                 }
                 TaskId::Gyro => {
-                    run_sensor_job(sensor_q, TaskId::Gyro, &mut gyro_runtime.seq);
+                    run_sensor_job(
+                        sensor_q,
+                        health_log_q,
+                        &mut scheduler_q_stats,
+                        task_start,
+                        job.id,
+                        &mut gyro_runtime.seq,
+                    );
 
-                    let finish = Instant::now();
-                    let missed = finish > job.deadline_at;
-                    gyro_runtime.stats.record_completion(task_start, finish, missed);
-
-                    if missed {
-                        let _ = scheduler_log_q.push(LogRecord {
-                            source: LogSource::Scheduler,
-                            level: LogLevel::Critical,
-                            timestamp_ms: elapsed_ms_u32(now),
-                            code: 1003,
-                            value: 0,
-                        });
-                    }
+                    record_task_completion(
+                        job.id,
+                        &mut gyro_runtime.stats,
+                        &mut scheduler_q_stats,
+                        scheduler_log_q,
+                        job.deadline_at,
+                        task_start,
+                    );
                 }
                 TaskId::Battery => {
-                    run_sensor_job(sensor_q, TaskId::Battery, &mut battery_runtime.seq);
+                    run_sensor_job(
+                        sensor_q,
+                        health_log_q,
+                        &mut scheduler_q_stats,
+                        task_start,
+                        job.id,
+                        &mut battery_runtime.seq,
+                    );
 
-                    let finish = Instant::now();
-                    let missed = finish > job.deadline_at;
-                    battery_runtime.stats.record_completion(task_start, finish, missed);
-
-                    if missed {
-                        let _ = scheduler_log_q.push(LogRecord {
-                            source: LogSource::Scheduler,
-                            level: LogLevel::Critical,
-                            timestamp_ms: elapsed_ms_u32(now),
-                            code: 1004,
-                            value: 0,
-                        });
-                    }
+                    record_task_completion(
+                        job.id,
+                        &mut battery_runtime.stats,
+                        &mut scheduler_q_stats,
+                        scheduler_log_q,
+                        job.deadline_at,
+                        task_start,
+                    );
                 }
                 _ => {}
             }
+
+            cpu_stats.add_active(now.elapsed());
         }
         else {
             let next_release = gyro_runtime.next_release
@@ -298,40 +332,34 @@ pub fn run_scheduler_loop(
                 .min(antenna_runtime.next_release)
                 .min(cmd_exec_runtime.next_release);
 
+            let idle_start = Instant::now();
+
             let wake_time = next_release - Duration::from_micros(100);
             thread::sleep(wake_time.saturating_duration_since(Instant::now()));
-        }
 
-        let duration = now.elapsed();
-        total += duration;
-        max_loop_time = max_loop_time.max(duration);
+            cpu_stats.add_idle(idle_start.elapsed());
+        }
+        
         tick += 1;
     }
 
-    println!("================ Scheduler Report ================");
-    println!("gyro runs      : {}", gyro_runtime.seq);
-    println!("battery runs   : {}", battery_runtime.seq);
+    SchedulerReport {
+        cpu_stats,
+        command_stats,
+        scheduler_q_stats,
 
-    if tick > 0 {
-        println!(
-            "avg loop time  : {:?}",
-            duration_div(total, tick)
-        );
-    } else {
-        println!("avg loop time  : 0ns");
+        gyro_timing,
+        battery_timing,
+        compression_timing,
+        health_timing,
+        antenna_timing,
+        cmd_exec_timing,
+
+        gyro_runtime,
+        battery_runtime,
+        compression_runtime,
+        health_runtime,
+        antenna_runtime,
+        cmd_exec_runtime,
     }
-
-    println!("max loop time  : {:?}", max_loop_time);
-    println!();
-
-    print_task_report("Gyro", &gyro_timing, &gyro_runtime.stats, true);
-    println!();
-    print_task_report("Battery", &battery_timing, &battery_runtime.stats, true);
-    println!();
-    print_task_report("Antenna", &antenna_timing, &antenna_runtime.stats, true);
-    println!();
-    print_task_report("Health", &health_timing, &health_runtime.stats, true);
-    println!();
-    print_command_report("Command", &command_stats);
-    println!("==================================================");
 }

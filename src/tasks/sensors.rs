@@ -1,8 +1,38 @@
 use std::time::Instant;
 use crate::common::metrics::elapsed_ms_u32;
+use crate::common::scheduler_stats::SchedulerStats;
 use crate::common::sensors::{BatteryMsg, GyroMsg, SensorData, SensorType};
 use crate::common::tasks::TaskId;
-use crate::config::SensorSPSCBuffer;
+use crate::config::{HealthLogSPSCBuffer, SensorSPSCBuffer};
+use crate::logging::default::LogLevel;
+use crate::logging::health::{HealthLogCode, HealthLogRecord};
+
+#[inline]
+fn push_sensor_drop_log(
+    health_log_q: &HealthLogSPSCBuffer,
+    stats: &mut SchedulerStats,
+    start_time: Instant,
+    code: HealthLogCode,
+) {
+    let record = HealthLogRecord {
+        level: LogLevel::Warn,
+        timestamp_ms: elapsed_ms_u32(start_time),
+        code,
+        value: 1,
+    };
+
+    match code {
+        HealthLogCode::GyroSampleDropped =>
+            stats.gyro_dropped = stats.gyro_dropped.saturating_add(1),
+        HealthLogCode::BatterySampleDropped =>
+            stats.battery_dropped = stats.battery_dropped.saturating_add(1),
+        _ => {}
+    }
+
+    if health_log_q.push(record).is_err() {
+        stats.health_log_dropped = stats.health_log_dropped.saturating_add(1);
+    }
+}
 
 fn read_gyro_sensor(seq: u64) -> GyroMsg {
     GyroMsg {
@@ -24,20 +54,70 @@ fn read_battery_sensor(seq: u64) -> BatteryMsg {
 
 fn push_sensor_reading(
     sensor_buffer: &SensorSPSCBuffer,
+    health_log_q: &HealthLogSPSCBuffer,
+    stats: &mut SchedulerStats,
+    start_time: Instant,
+    task_id: TaskId,
     data: SensorData,
 ) {
-    let _ = sensor_buffer.push(data);
+
+    if sensor_buffer.push(data).is_err() {
+        match task_id {
+            TaskId::Gyro => {
+                push_sensor_drop_log(
+                    health_log_q,
+                    stats,
+                    start_time,
+                    HealthLogCode::GyroSampleDropped,
+                );
+            }
+            TaskId::Battery => {
+                push_sensor_drop_log(
+                    health_log_q,
+                    stats,
+                    start_time,
+                    HealthLogCode::BatterySampleDropped,
+                );
+            }
+            _ => {}
+        }
+    }
 }
 
-pub fn run_sensor_job(sensor_buffer: &SensorSPSCBuffer, task_id: TaskId, seq: &mut u64) {
+pub fn run_sensor_job(
+    sensor_buffer: &SensorSPSCBuffer,
+    health_log_q: &HealthLogSPSCBuffer,
+    stats: &mut SchedulerStats,
+    start_time: Instant,
+    task_id: TaskId,
+    seq: &mut u64
+) {
     match task_id {
         TaskId::Gyro => {
             let data = read_gyro_sensor(*seq);
-            push_sensor_reading(sensor_buffer, SensorData::Gyro(data));
+            push_sensor_reading(
+                sensor_buffer,
+                health_log_q,
+                stats,
+                start_time,
+                task_id,
+                SensorData::Gyro(data),
+            );
+
+            *seq += 1;
         }
         TaskId::Battery => {
             let data = read_battery_sensor(*seq);
-            push_sensor_reading(sensor_buffer, SensorData::Battery(data));
+            push_sensor_reading(
+                sensor_buffer,
+                health_log_q,
+                stats,
+                start_time,
+                task_id,
+                SensorData::Battery(data),
+            );
+
+            *seq += 1;
         }
         _ => {}
     }
