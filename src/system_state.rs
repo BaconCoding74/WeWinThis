@@ -15,6 +15,7 @@ pub struct SystemState {
     pub last_temp_x10: AtomicI16,
     pub thermal_overheat: AtomicBool,
     pub thermal_alert: AtomicBool,
+    pub fault_detect_time: AtomicU32,
 
     pub last_sequence: AtomicU32,
 }
@@ -29,6 +30,7 @@ impl SystemState {
             last_temp_x10: AtomicI16::new(0),
             thermal_overheat: AtomicBool::new(false),
             thermal_alert: AtomicBool::new(false),
+            fault_detect_time: AtomicU32::new(0),
 
             last_sequence: AtomicU32::new(0),
         }
@@ -71,5 +73,24 @@ impl SystemState {
 
     pub fn is_visible(&self) -> bool {
         self.visibility_open.load(Ordering::Acquire)
+    }
+
+    pub fn set_fault_detect_time(&self, timestamp_ms: u32) {
+        self.fault_detect_time
+            .store(timestamp_ms, Ordering::Release);
+    }
+
+    pub fn get_fault_detect_time(&self) -> u32 {
+        self.fault_detect_time.load(Ordering::Acquire)
+    }
+
+    pub fn has_active_fault(&self) -> bool {
+        self.thermal_alert.load(Ordering::Acquire) || self.thermal_overheat.load(Ordering::Acquire)
+    }
+
+    pub fn clear_fault(&self) {
+        self.thermal_alert.store(false, Ordering::Release);
+        self.thermal_overheat.store(false, Ordering::Release);
+        self.fault_detect_time.store(0, Ordering::Release);
     }
 }

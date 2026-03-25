@@ -81,6 +81,19 @@ pub fn log_jitter(
     ));
 }
 
+pub fn log_critical_alert(
+    logger: &mut Logger,
+    timestamp: u128,
+    alert_type: &str,
+    latency_ms: u128,
+    description: &str,
+) {
+    logger.log(&format!(
+        "{},{},{},{}",
+        timestamp, alert_type, latency_ms, description
+    ));
+}
+
 pub fn now_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

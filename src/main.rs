@@ -38,12 +38,14 @@ fn main() {
     let state_scheduler = Arc::clone(&system_state);
     let command_logger_clone = Arc::clone(&command_logger);
     let performance_logger_clone = Arc::clone(&performance_logger);
+    let fault_logger_clone = Arc::clone(&fault_logger);
 
     thread::spawn(move || {
         gcs_scheduler(
             state_scheduler,
             command_logger_clone,
             performance_logger_clone,
+            fault_logger_clone,
         );
     });
 

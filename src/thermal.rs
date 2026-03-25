@@ -1,6 +1,9 @@
 use std::sync::atomic::Ordering;
 
-use crate::system_state::{RuntimeMode, SystemState};
+use crate::{
+    logger::now_ms,
+    system_state::{RuntimeMode, SystemState},
+};
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,15 +136,18 @@ pub fn update_system_state_from_thermal(state: &SystemState, msg: ThermalToComm,
                 ThermalAlertCode::Overheat => {
                     state.thermal_overheat.store(true, Ordering::Release);
                     state.thermal_alert.store(true, Ordering::Release);
+                    state.set_fault_detect_time(now_ms() as u32);
                 }
 
                 ThermalAlertCode::EmergencyShutdown => {
                     state.set_mode(RuntimeMode::Emergency);
+                    state.set_fault_detect_time(now_ms() as u32);
                 }
 
                 ThermalAlertCode::Recovery => {
                     state.thermal_overheat.store(false, Ordering::Release);
                     state.thermal_alert.store(false, Ordering::Release);
+                    state.set_fault_detect_time(0);
                 }
 
                 _ => {}

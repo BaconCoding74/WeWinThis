@@ -66,6 +66,8 @@ pub fn gcs_receiver(
 ) {
     let mut buffer = [0u8; PACKET_SIZE];
     let mut expected_seq: Option<u32> = None;
+    let mut consecutive_misses: u32 = 0;
+    let mut contact_lost = false;
 
     loop {
         let n = match stream.read(&mut buffer) {
@@ -93,17 +95,50 @@ pub fn gcs_receiver(
             }
         };
 
-        // Sequence check
+        // Sequence check - track missing packets
         if let Some(prev) = expected_seq {
             let expected = prev.wrapping_add(1);
             if packet.seq != expected {
+                let missed_count = packet.seq.wrapping_sub(prev).saturating_sub(1);
+                consecutive_misses += missed_count;
                 eprintln!(
-                    "Sequence gap detected: expected {}, got {}",
-                    expected, packet.seq
+                    "Sequence gap detected: expected {}, got {} (missed {} packets)",
+                    expected, packet.seq, missed_count
                 );
+
+                // Re-request mechanism: log the missed sequence for re-request
+                // Actual re-request would need a bidirectional channel to OCS
+                for i in 0..missed_count {
+                    let missed_seq = expected.wrapping_add(i);
+                    println!(
+                        "[RE-REQUEST] Packet seq={} missed, needs retransmission",
+                        missed_seq
+                    );
+                }
+            } else {
+                // Sequence is correct, reset consecutive misses
+                consecutive_misses = 0;
+                contact_lost = false;
             }
         }
         expected_seq = Some(packet.seq);
+
+        // Loss of contact detection: >=3 consecutive missed packets
+        if consecutive_misses >= 3 && !contact_lost {
+            contact_lost = true;
+            eprintln!(
+                "[ALERT] LOSS OF CONTACT - {} consecutive packet failures",
+                consecutive_misses
+            );
+
+            let mut logger = fault_logger.lock().unwrap();
+            logger.log(&format!(
+                "{},{},{}",
+                now_ms(),
+                "LOSS_OF_CONTACT",
+                consecutive_misses
+            ));
+        }
 
         let now = now_ms();
         let latency_ms = now.saturating_sub(packet.timestamp_ms as u128);
@@ -272,11 +307,12 @@ pub fn gcs_scheduler(
     system_state: Arc<SystemState>,
     command_logger: Arc<Mutex<Logger>>,
     performance_logger: Arc<Mutex<Logger>>,
+    fault_logger: Arc<Mutex<Logger>>,
 ) {
     let stream =
         TcpStream::connect((LOCALHOST, RECEIVER_PORT)).expect("Failed to connect to TCP server");
 
-    let mut scheduler = CommandScheduler::new(stream);
+    let mut scheduler = CommandScheduler::new(stream, Some(fault_logger));
 
     let start_time = Instant::now();
     let now = Instant::now();
