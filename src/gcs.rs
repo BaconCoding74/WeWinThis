@@ -409,11 +409,10 @@ pub fn gcs_connection_handler(
     performance_logger: Arc<Mutex<Logger>>,
     telemetry_backlog: Arc<AtomicU32>,
 ) {
-    let stream = stream;
-    let mut scheduler = CommandScheduler::new(
-        stream.try_clone().expect("Failed to clone stream"),
-        Some(fault_logger.clone()),
-    );
+    let scheduler_stream = stream.try_clone().expect("Failed to clone stream");
+    scheduler_stream.set_nonblocking(true).ok();
+    scheduler_stream.set_nodelay(true).ok();
+    let mut scheduler = CommandScheduler::new(scheduler_stream, Some(fault_logger.clone()));
 
     let _start_time = Instant::now();
     let now = Instant::now();
@@ -435,6 +434,7 @@ pub fn gcs_connection_handler(
         .stream
         .try_clone()
         .expect("Failed to clone stream for reading");
+    stream_ref.set_nonblocking(true).ok();
 
     loop {
         let loop_start = Instant::now();
