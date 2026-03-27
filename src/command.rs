@@ -1,6 +1,6 @@
 use crate::{
-    logger::{log_command, log_critical_alert, now_ms, Logger},
-    network::{encode_packet, MessageType, Packet},
+    logger::{Logger, log_command, log_critical_alert, now_ms},
+    network::{MessageType, Packet, encode_packet},
     system_state::{RuntimeMode, SystemState},
 };
 use std::{
@@ -33,7 +33,11 @@ pub struct ScheduledCommand {
     pub deadline: Duration,
 }
 
-pub fn send_command(command: &ScheduledCommand, stream: &mut TcpStream) {
+pub fn send_command(
+    command: &ScheduledCommand,
+    stream: &mut TcpStream,
+    gcs_stats: Option<&Arc<crate::GcsStats>>,
+) {
     static SEQ: AtomicU32 = AtomicU32::new(1);
 
     let sequence = SEQ.fetch_add(1, Ordering::Relaxed);
@@ -63,6 +67,10 @@ pub fn send_command(command: &ScheduledCommand, stream: &mut TcpStream) {
         return;
     }
 
+    if let Some(stats) = gcs_stats {
+        stats.record_command_sent();
+    }
+
     println!(
         "Command sent: {:?}, seq: {}",
         command.command.cmd_type, sequence
@@ -73,14 +81,20 @@ pub struct CommandScheduler {
     pub queue: VecDeque<ScheduledCommand>,
     pub stream: TcpStream,
     pub fault_logger: Option<Arc<Mutex<Logger>>>,
+    pub gcs_stats: Option<Arc<crate::GcsStats>>,
 }
 
 impl CommandScheduler {
-    pub fn new(stream: TcpStream, fault_logger: Option<Arc<Mutex<Logger>>>) -> Self {
+    pub fn new(
+        stream: TcpStream,
+        fault_logger: Option<Arc<Mutex<Logger>>>,
+        gcs_stats: Option<Arc<crate::GcsStats>>,
+    ) -> Self {
         Self {
             queue: VecDeque::new(),
             stream,
             fault_logger,
+            gcs_stats,
         }
     }
 
@@ -144,6 +158,11 @@ impl CommandScheduler {
                 }
 
                 log_command(logger, ts, &cmd_type, latency_ms, "REJECTED_INTERLOCK");
+
+                if let Some(ref stats) = self.gcs_stats {
+                    stats.record_command_interlock();
+                }
+
                 return true;
             }
 
@@ -155,7 +174,7 @@ impl CommandScheduler {
                 log_command(logger, ts, &cmd_type, latency_ms, "ON_TIME");
             }
 
-            send_command(&cmd, &mut self.stream);
+            send_command(&cmd, &mut self.stream, self.gcs_stats.as_ref());
 
             return true;
         }

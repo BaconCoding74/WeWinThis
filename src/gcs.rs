@@ -22,8 +22,10 @@ use crate::{
     thermal::{ThermalToComm, decode_alert, update_system_state_from_thermal},
 };
 
+#[allow(clippy::too_many_arguments)]
 pub fn tcp_listener(
     system_state: Arc<SystemState>,
+    gcs_stats: Arc<crate::GcsStats>,
     command_logger: Arc<Mutex<Logger>>,
     telemetry_logger: Arc<Mutex<Logger>>,
     system_state_logger: Arc<Mutex<Logger>>,
@@ -42,6 +44,7 @@ pub fn tcp_listener(
                 println!("New client connected");
 
                 let state = Arc::clone(&system_state);
+                let stats = Arc::clone(&gcs_stats);
                 let command_logger_clone = Arc::clone(&command_logger);
                 let telemetry_logger_clone = Arc::clone(&telemetry_logger);
                 let system_state_logger_clone = Arc::clone(&system_state_logger);
@@ -53,6 +56,7 @@ pub fn tcp_listener(
                     gcs_connection_handler(
                         stream,
                         state,
+                        stats,
                         command_logger_clone,
                         telemetry_logger_clone,
                         system_state_logger_clone,
@@ -402,6 +406,7 @@ pub fn gcs_receiver(
 pub fn gcs_connection_handler(
     stream: TcpStream,
     system_state: Arc<SystemState>,
+    gcs_stats: Arc<crate::GcsStats>,
     command_logger: Arc<Mutex<Logger>>,
     telemetry_logger: Arc<Mutex<Logger>>,
     system_state_logger: Arc<Mutex<Logger>>,
@@ -412,7 +417,11 @@ pub fn gcs_connection_handler(
     let scheduler_stream = stream.try_clone().expect("Failed to clone stream");
     scheduler_stream.set_nonblocking(true).ok();
     scheduler_stream.set_nodelay(true).ok();
-    let mut scheduler = CommandScheduler::new(scheduler_stream, Some(fault_logger.clone()));
+    let mut scheduler = CommandScheduler::new(
+        scheduler_stream,
+        Some(fault_logger.clone()),
+        Some(gcs_stats.clone()),
+    );
 
     let _start_time = Instant::now();
     let now = Instant::now();
@@ -453,6 +462,7 @@ pub fn gcs_connection_handler(
                         handle_packet(
                             &packet,
                             &system_state,
+                            &gcs_stats,
                             &telemetry_logger,
                             &system_state_logger,
                             &fault_logger,
@@ -497,6 +507,7 @@ pub fn gcs_connection_handler(
 fn handle_packet(
     packet: &Packet,
     system_state: &Arc<SystemState>,
+    gcs_stats: &Arc<crate::GcsStats>,
     telemetry_logger: &Arc<Mutex<Logger>>,
     system_state_logger: &Arc<Mutex<Logger>>,
     fault_logger: &Arc<Mutex<Logger>>,
@@ -553,6 +564,7 @@ fn handle_packet(
 
     match packet.msg_type {
         MessageType::Telemetry => {
+            gcs_stats.record_telemetry();
             let payload = &packet.payload[..packet.payload_len as usize];
             let data = match decode_telemetry(payload) {
                 Ok(d) => d,
@@ -626,6 +638,7 @@ fn handle_packet(
         }
 
         MessageType::Fault => {
+            gcs_stats.record_fault();
             let payload = &packet.payload[..packet.payload_len as usize];
             let msg = match decode_alert(payload) {
                 Ok(m) => m,
@@ -650,9 +663,13 @@ fn handle_packet(
         MessageType::Ack => {
             let payload = &packet.payload[..packet.payload_len as usize];
             match decode_ack(payload) {
-                Ok(AckResult::Success) => println!("[ACK] seq={} SUCCESS", packet.seq),
+                Ok(AckResult::Success) => {
+                    println!("[ACK] seq={} SUCCESS", packet.seq);
+                    gcs_stats.record_command_acked();
+                }
                 Ok(AckResult::Rejected(reason)) => {
-                    println!("[ACK] seq={} REJECTED {:?}", packet.seq, reason)
+                    println!("[ACK] seq={} REJECTED {:?}", packet.seq, reason);
+                    gcs_stats.record_command_rejected();
                 }
                 Err(_) => {}
             }
