@@ -11,7 +11,7 @@ use std::{
 
 use crate::{
     command::CommandScheduler,
-    command_schedule::build_command_schedule,
+    command_schedule::{build_command_schedule, reschedule_cycle},
     constants::{LOCALHOST, LOG_DIR, PACKET_SIZE, RECEIVER_PORT},
     logger::{
         log_decode_latency, log_fault, log_jitter, log_system_state, log_telemetry, now_ms, Logger,
@@ -452,6 +452,10 @@ pub fn gcs_scheduler(
                 actual_interval_ms,
                 jitter_ms,
             );
+        }
+
+        if scheduler.is_queue_empty() {
+            reschedule_cycle(&mut scheduler, loop_start);
         }
 
         let after_work = Instant::now();

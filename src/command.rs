@@ -88,6 +88,10 @@ impl CommandScheduler {
         self.queue.push_back(cmd);
     }
 
+    pub fn is_queue_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
     pub fn run(&mut self, system_state: &SystemState, logger: &mut Logger) -> bool {
         let now = Instant::now();
 
