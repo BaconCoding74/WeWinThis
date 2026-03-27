@@ -14,13 +14,13 @@ use std::net::{SocketAddr};
 use std::sync::{Arc};
 use std::sync::atomic::{Ordering};
 use std::thread;
-use std::time::{Duration};
+use std::time::{Duration, Instant};
 use thread_priority::{set_current_thread_priority, ThreadPriority};
 use crate::common::packet::{DownlinkItem};
 use crate::common::sensors::SensorData;
 use crate::common::system_state::{SystemState};
 use crate::communication::main::run_tcp_comm_loop;
-use crate::config::{SensorSPSCBuffer, COMMPRESSION_LOG_BUF_CAP, COMMAND_LOG_BUF_CAP, UPLINK_BUF_CAP, DOWNLINK_BUF_CAP, HEALTH_LOG_BUF_CAP, SENSOR_BUF_CAP, SCHEDULER_LOG_BUF_CAP, THERMAL_BUF_CAP, THERMAL_LOG_BUF_CAP, ThermalSPSCBuffer, DEFAULT_MAX_TEMP_X10, DEFAULT_TARGET_TEMP_X10, ThermalLogSPSCBuffer, SIMULATION_TIME, SchedulerLogSPSCBuffer, DownlinkSPSCBuffer, UplinkSPSCBuffer, CommLogSPSCBuffer, COMM_LOG_BUF_CAP, ANT_LOG_BUF_CAP, AntLogSPSCBuffer, HealthLogSPSCBuffer, CommandLogSPSCBuffer, CompressionLogSPSCBuffer};
+use crate::config::{SensorSPSCBuffer, COMMPRESSION_LOG_BUF_CAP, COMMAND_LOG_BUF_CAP, UPLINK_BUF_CAP, DOWNLINK_BUF_CAP, HEALTH_LOG_BUF_CAP, SENSOR_BUF_CAP, SCHEDULER_LOG_BUF_CAP, THERMAL_BUF_CAP, THERMAL_LOG_BUF_CAP, ThermalSPSCBuffer, DEFAULT_MAX_TEMP_X10, DEFAULT_TARGET_TEMP_X10, ThermalLogSPSCBuffer, SIMULATION_TIME, SchedulerLogSPSCBuffer, DownlinkSPSCBuffer, UplinkSPSCBuffer, CommLogSPSCBuffer, COMM_LOG_BUF_CAP, ANT_LOG_BUF_CAP, AntLogSPSCBuffer, HealthLogSPSCBuffer, CommandLogSPSCBuffer, CompressionLogSPSCBuffer, LOGGER_IDLE_SLEEP_MS};
 use crate::logger::main::run_logger_main;
 use crate::logging::antenna::AntennaLogRecord;
 use crate::logging::command::CommandLogRecord;
@@ -213,8 +213,25 @@ fn main() {
         });
     }
 
-    thread::sleep(Duration::from_secs(SIMULATION_TIME));
-    system_state.stop.store(true, Ordering::Release);
+    let start = Instant::now();
+    loop {
+        let elapsed = start.elapsed().as_secs();
+
+        if elapsed >= SIMULATION_TIME {
+            system_state.stop.store(true, Ordering::Release);
+            break;
+        }
+
+        if system_state.stop.load(Ordering::Acquire) {
+            break;
+        }
+
+        let remaining = SIMULATION_TIME - elapsed;
+        let sleep_ms = remaining.min(LOGGER_IDLE_SLEEP_MS as u64);
+
+        thread::sleep(Duration::from_millis(sleep_ms));
+    }
+
 
     let scheduler_report = scheduler_thread.join().unwrap();
     let thermal_report = thermal_handle.join().unwrap();

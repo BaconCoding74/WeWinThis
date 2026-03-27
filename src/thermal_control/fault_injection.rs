@@ -1,4 +1,3 @@
-use std::sync::atomic::Ordering;
 use crate::config::{ThermalLogSPSCBuffer, THERMAL_FAULT_PERIOD_MS};
 use crate::logging::default::LogLevel;
 use crate::logging::thermal::{ThermalLogCode, ThermalLogRecord};

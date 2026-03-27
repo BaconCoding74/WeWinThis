@@ -2,11 +2,10 @@ use std::sync::Arc;
 use std::time::Instant;
 use crate::common::command_stats::CommandStats;
 use crate::common::metrics::elapsed_ms_u32;
-use crate::common::packet::{MessageType, Packet};
 use crate::common::system_state::{SystemMode, SystemState};
-use crate::config::{CommandLogSPSCBuffer, DownlinkSPSCBuffer, SchedulerLogSPSCBuffer, UplinkSPSCBuffer, COMM_PAYLOAD_SIZE, MAX_COMMANDS_PER_RUN};
+use crate::config::{CommandLogSPSCBuffer, DownlinkSPSCBuffer, UplinkSPSCBuffer, MAX_COMMANDS_PER_RUN};
 use crate::logging::command::{CommandLogCode, CommandLogRecord, CommandLogRejectReason};
-use crate::logging::default::{LogLevel, LogRecord, LogSource};
+use crate::logging::default::{LogLevel};
 use crate::protocol::command_packet::{command_response_to_packet, CommandCode};
 
 #[inline]
@@ -53,7 +52,6 @@ pub fn run_command_exec_job(
         cmd_stats.record_received();
 
         let exec_start = Instant::now();
-        let mut result_code: u8 = 0;
 
         match cmd.code {
             CommandCode::SetNormal => {

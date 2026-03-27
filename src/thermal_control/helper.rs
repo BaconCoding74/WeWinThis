@@ -1,4 +1,3 @@
-use std::sync::atomic::{AtomicU32, Ordering};
 use crate::common::system_state::SystemMode;
 use crate::config::{ThermalLogSPSCBuffer, ThermalSPSCBuffer, THERMAL_MISS_LIMIT, THERMAL_RECOVERY_LIMIT_MS};
 use crate::logging::default::LogLevel;

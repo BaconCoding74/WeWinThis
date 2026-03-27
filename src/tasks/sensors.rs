@@ -1,7 +1,7 @@
 use std::time::Instant;
 use crate::common::metrics::elapsed_ms_u32;
 use crate::common::scheduler_stats::SchedulerStats;
-use crate::common::sensors::{BatteryMsg, GyroMsg, SensorData, SensorType};
+use crate::common::sensors::{BatteryMsg, GyroMsg, SensorData};
 use crate::common::tasks::TaskId;
 use crate::config::{HealthLogSPSCBuffer, SensorSPSCBuffer};
 use crate::logging::default::LogLevel;

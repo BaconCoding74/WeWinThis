@@ -1,12 +1,11 @@
 use std::sync::Arc;
 use std::time::Duration;
-use crate::common::packet::{DownlinkItem, Packet};
+use crate::common::packet::{DownlinkItem};
 use crate::common::sensors::SensorData;
 use crate::logging::antenna::AntennaLogRecord;
 use crate::logging::command::CommandLogRecord;
 use crate::logging::communication::CommLogRecord;
 use crate::logging::compression::CompressionLogRecord;
-use crate::logging::default::LogRecord;
 use crate::logging::health::HealthLogRecord;
 use crate::logging::scheduler::SchedulerLogRecord;
 use crate::logging::thermal::ThermalLogRecord;

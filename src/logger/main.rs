@@ -35,7 +35,6 @@ pub fn run_logger_main(
     let mut last_flush = Instant::now();
 
     loop {
-        let loop_start = Instant::now();
         let mut drained_any = false;
 
         drain_queue(
