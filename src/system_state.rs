@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicI16, AtomicU32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI16, AtomicU8, AtomicU32, Ordering};
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

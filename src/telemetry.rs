@@ -1,4 +1,4 @@
-use crate::thermal::{decode_status, ThermalStatusMsg, ThermalToComm};
+use crate::thermal::{ThermalStatusMsg, ThermalToComm, decode_status};
 
 #[derive(Debug, Clone, Copy)]
 pub struct GyroMsg {

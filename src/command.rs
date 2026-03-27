@@ -1,6 +1,6 @@
 use crate::{
-    logger::{log_command, log_critical_alert, now_ms, Logger},
-    network::{encode_packet, MessageType, Packet},
+    logger::{Logger, log_command, log_critical_alert, now_ms},
+    network::{MessageType, Packet, encode_packet},
     system_state::{RuntimeMode, SystemState},
 };
 use std::{

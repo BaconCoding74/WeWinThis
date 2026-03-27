@@ -33,6 +33,7 @@ pub fn log_command(
     ));
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn log_telemetry(
     logger: &mut Logger,
     timestamp: u128,
